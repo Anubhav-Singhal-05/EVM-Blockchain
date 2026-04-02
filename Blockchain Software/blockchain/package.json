@@ -1,0 +1,21 @@
+{
+  "name": "evm-blockchain",
+  "version": "1.0.0",
+  "description": "Blockchain component for the Electronic Voting Machine (EVM) project",
+  "scripts": {
+    "compile": "truffle compile",
+    "migrate": "truffle migrate --network development",
+    "test": "truffle test",
+    "upload": "node scripts/upload_votes.js",
+    "verify": "node scripts/verify_votes.js"
+  },
+  "dependencies": {
+    "@truffle/contract": "^4.6.31",
+    "dotenv": "^16.6.1",
+    "mysql2": "^3.6.0",
+    "web3": "^1.10.0"
+  },
+  "devDependencies": {
+    "truffle": "^5.11.5"
+  }
+}
