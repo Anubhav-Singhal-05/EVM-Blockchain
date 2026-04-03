@@ -1,59 +1,96 @@
 /**
- * upload_votes.js  —  Bridge: Middleware DB → Blockchain
- * -------------------------------------------------------
- * Reads all H2 (hash2) records from the Middleware Voting Software's
- * MySQL database, performs two-layer RSA decryption to recover the
- * plaintext vote (V), then calls castVote() on the deployed
- * VotingContract on Ganache for each voter.
+ * upload_votes.js  —  Bridge: Middleware API → Blockchain
+ * ----------------------------------------------------------
+ * Fetches completed vote records from the Middleware Voting Software
+ * (Device 2) via its REST API, performs two-layer RSA decryption,
+ * verifies fingerprints against the Global MongoDB DB (Atlas),
+ * and calls castVote() on the local Ganache blockchain for votes
+ * that pass verification.
  *
- * TWO-LAYER DECRYPTION:
- *   Layer 1 (E2 → uid, E1, TS2):
- *     hash2 = encryptToHash("uid||h1||ts2")
- *     → decryptFromHash(hash2) → "uid||h1_base64||ts2_iso"
+ * ┌──────────────┐   HTTP GET    ┌──────────────────────┐
+ * │  Middleware  │ ◄──────────── │  Blockchain Machine  │
+ * │  (Device 2)  │   export API  │      (Device 3)      │
+ * │  MySQL DB    │ ─────────────►│  upload_votes.js     │
+ * └──────────────┘  { records }  │        │             │
+ *                                │  decrypt E2 → E1     │
+ * ┌──────────────┐               │  extract F1,F2,V,TS1 │
+ * │ MongoDB Atlas│ ◄─────────────│  verify fingerprints │
+ * │  Global DB   │ ─────────────►│        │             │
+ * └──────────────┘  F1_g, F2_g   │  castVote() ─────────┼──► Ganache
+ *                                └──────────────────────┘
  *
- *   Layer 2 (E1 → uid, F1, F2, V, TS1):
- *     h1    = encryptToHash("uid||F1||F2||V||TS1")
- *     → decryptFromHash(h1)    → "uid||F1||F2||CandidateA||ts1_iso"
- *     field index [3] = V (vote), [4] = TS1
- *
- * ASSUMPTIONS:
- *   – ESP32 uses the same toy RSA key pair (p=61, q=53) as the middleware.
- *   – H1 plaintext format: "uid||F1||F2||V||TS1" (fields split by "||").
- *   – DB credentials and Ganache URL are read from .env in this directory.
- *   – VotingContract is already deployed (truffle migrate).
+ * CONFIGURATION (in .env):
+ *   MIDDLEWARE_API_URL  - Base URL of the Middleware backend
+ *                         e.g. http://192.168.1.10:5000
+ *   MIDDLEWARE_API_KEY  - Shared secret for X-API-Key header
+ *   MONGODB_URI         - MongoDB Atlas connection string
+ *   GANACHE_URL         - Local Ganache RPC (default: http://127.0.0.1:7545)
+ *   FP_THRESHOLD        - Fingerprint match % required (default: 80)
  *
  * Usage:
  *   node scripts/upload_votes.js
  */
 
 require("dotenv").config();
-const mysql = require("mysql2/promise");
-const Web3  = require("web3");
-const path  = require("path");
-const { decryptFromHash } = require("./rsa");
+const https  = require("https");
+const http   = require("http");
+const Web3   = require("web3");
+const path   = require("path");
+const { decryptFromHash }                             = require("./rsa");
+const { verifyFingerprints }                          = require("./fingerprint_matcher");
+const { connectGlobalDB, disconnectGlobalDB, getVoterFingerprints } = require("./global_db");
 
-// ── Config ──────────────────────────────────────────────────────────
+// ── Config ────────────────────────────────────────────────────────────
 
-const DB_CONFIG = {
-  host:     process.env.DB_HOST     || "localhost",
-  port:     Number(process.env.DB_PORT) || 3306,
-  user:     process.env.DB_USER     || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME     || "voting_db",
-};
-const GANACHE_URL = process.env.GANACHE_URL || "http://127.0.0.1:7545";
+const MIDDLEWARE_API_URL = (process.env.MIDDLEWARE_API_URL || "").replace(/\/$/, "");
+const MIDDLEWARE_API_KEY = process.env.MIDDLEWARE_API_KEY || "";
+const GANACHE_URL        = process.env.GANACHE_URL        || "http://127.0.0.1:7545";
+const FP_THRESHOLD       = Number(process.env.FP_THRESHOLD ?? 80);
 
-// E1 format: "uid||F1||F2||V||TS1"  (0-indexed fields split by "||")
-const SEP         = "||";
-const IDX_VOTE    = Number(process.env.E1_VOTE_INDEX ?? 3);
-const IDX_TS1     = Number(process.env.E1_TS1_INDEX  ?? 4);
+// E1 field indices (split by "||"):  uid || F1 || F2 || V || TS1
+const SEP      = "||";
+const IDX_F1   = Number(process.env.E1_F1_INDEX   ?? 1);
+const IDX_F2   = Number(process.env.E1_F2_INDEX   ?? 2);
+const IDX_VOTE = Number(process.env.E1_VOTE_INDEX  ?? 3);
+const IDX_TS1  = Number(process.env.E1_TS1_INDEX   ?? 4);
 
-// ── Helpers ─────────────────────────────────────────────────────────
+// ── HTTP helper ───────────────────────────────────────────────────────
 
 /**
- * Split a decrypted plaintext by "||".
- * Uses a simple string-split approach that handles the double-pipe separator.
+ * Simple GET request returning parsed JSON.
+ * Works with both http:// and https:// URLs.
+ * No external dependency — uses Node's built-in http/https modules.
  */
+function getJSON(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const lib     = url.startsWith("https") ? https : http;
+    const options = { headers };
+
+    const req = lib.get(url, options, (res) => {
+      let data = "";
+      res.on("data", chunk => (data += chunk));
+      res.on("end", () => {
+        if (res.statusCode === 401) {
+          return reject(new Error("Middleware API: 401 Unauthorized — check MIDDLEWARE_API_KEY"));
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`Middleware API returned HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+        }
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(new Error(`Middleware API: invalid JSON response — ${data.slice(0, 100)}`)); }
+      });
+    });
+
+    req.on("error", reject);
+    req.setTimeout(15000, () => {
+      req.destroy();
+      reject(new Error("Middleware API request timed out after 15s"));
+    });
+  });
+}
+
+// ── Decrypt helpers ───────────────────────────────────────────────────
+
 function splitFields(plaintext) {
   const parts = [];
   let idx = 0;
@@ -66,79 +103,79 @@ function splitFields(plaintext) {
   return parts;
 }
 
-/**
- * Decrypt E2 (hash2) → { uid, e1, ts2 }
- * hash2 = encryptToHash("uid||h1_base64||ts2_iso")
- * The h1 field itself may contain "||" (if F1/F2 do), so we split on
- * the FIRST and LAST "||" only (uid is first, ts2 is last ISO timestamp).
- */
 function decryptE2(hash2) {
-  const plain  = decryptFromHash(hash2);
-  const first  = plain.indexOf(SEP);
-  const last   = plain.lastIndexOf(SEP);
-
+  const plain = decryptFromHash(hash2);
+  const first = plain.indexOf(SEP);
+  const last  = plain.lastIndexOf(SEP);
   if (first === -1 || first === last) {
-    throw new Error(`E2 plaintext format unexpected: "${plain.slice(0, 60)}..."`);
+    throw new Error(`Unexpected E2 format: "${plain.slice(0, 60)}..."`);
   }
-
-  const uid = plain.slice(0, first);
-  const ts2 = plain.slice(last + SEP.length);
-  const e1  = plain.slice(first + SEP.length, last);
-  return { uid, e1, ts2 };
-}
-
-/**
- * Decrypt E1 (h1) → { vote, ts1, rawFields }
- * h1 = encryptToHash("uid||F1||F2||V||TS1")
- */
-function decryptE1(h1) {
-  const plain  = decryptFromHash(h1);
-  const fields = splitFields(plain);
-
-  if (fields.length <= Math.max(IDX_VOTE, IDX_TS1)) {
-    throw new Error(
-      `E1 plaintext has only ${fields.length} fields (expected ≥${Math.max(IDX_VOTE, IDX_TS1) + 1}): "${plain.slice(0, 60)}..."`
-    );
-  }
-
   return {
-    vote:      fields[IDX_VOTE],
-    ts1:       fields[IDX_TS1],
-    rawFields: fields,
+    uid: plain.slice(0, first),
+    e1:  plain.slice(first + SEP.length, last),
+    ts2: plain.slice(last + SEP.length),
   };
 }
 
-// ── Main ─────────────────────────────────────────────────────────────
+function decryptE1(h1) {
+  const plain    = decryptFromHash(h1);
+  const fields   = splitFields(plain);
+  const required = Math.max(IDX_F1, IDX_F2, IDX_VOTE, IDX_TS1) + 1;
+  if (fields.length < required) {
+    throw new Error(
+      `E1 has only ${fields.length} fields (need ≥${required}): "${plain.slice(0, 60)}..."`
+    );
+  }
+  return {
+    uid:  fields[0],
+    f1:   fields[IDX_F1],
+    f2:   fields[IDX_F2],
+    vote: fields[IDX_VOTE],
+    ts1:  fields[IDX_TS1],
+  };
+}
+
+// ── Main ──────────────────────────────────────────────────────────────
 
 async function main() {
-  // 1. Connect to MySQL
-  console.log("[DB] Connecting to MySQL at", `${DB_CONFIG.host}:${DB_CONFIG.port}/${DB_CONFIG.database}`);
-  const db = await mysql.createConnection(DB_CONFIG);
-  console.log("[DB] Connected.\n");
+  if (!MIDDLEWARE_API_URL) {
+    console.error(
+      "[ERROR] MIDDLEWARE_API_URL is not set in .env\n" +
+      "        Set it to the Middleware machine's address, e.g.:\n" +
+      "        MIDDLEWARE_API_URL=http://192.168.1.10:5000"
+    );
+    process.exit(1);
+  }
 
-  // 2. Fetch all hash_records (E2 rows), joined with voters for reference
-  const [rows] = await db.execute(`
-    SELECT
-      hr.uid      AS uid,
-      hr.hash2    AS hash2,
-      hr.created_at AS hr_created,
-      v.name      AS voter_name,
-      v.hash1     AS hash1_direct,
-      v.timestamp2 AS ts2_direct
-    FROM hash_records hr
-    LEFT JOIN voters v ON v.uid = hr.uid
-    ORDER BY hr.created_at ASC
-  `);
+  // 1. Fetch completed vote records from Middleware API
+  const exportUrl = `${MIDDLEWARE_API_URL}/api/voters/export-for-blockchain`;
+  console.log(`[Middleware API] Fetching records from: ${exportUrl}`);
 
-  console.log(`[DB] Found ${rows.length} record(s) in hash_records.\n`);
+  let apiResponse;
+  try {
+    apiResponse = await getJSON(exportUrl, {
+      "X-API-Key":    MIDDLEWARE_API_KEY,
+      "Content-Type": "application/json",
+    });
+  } catch (err) {
+    console.error(`[Middleware API] ✗ ${err.message}`);
+    process.exit(1);
+  }
 
-  if (rows.length === 0) {
-    console.log("Nothing to upload. Run the voting hardware flow first.");
-    await db.end();
+  const records = apiResponse.records || [];
+  console.log(`[Middleware API] Received ${records.length} completed vote record(s).\n`);
+
+  if (records.length === 0) {
+    console.log("Nothing to upload. Ask the voting official to process votes first.");
     return;
   }
 
-  // 3. Connect to Ganache
+  // 2. Connect to MongoDB Atlas (Global Voter DB)
+  console.log("[GlobalDB] Connecting to MongoDB Atlas...");
+  await connectGlobalDB();
+  console.log("[GlobalDB] Connected.\n");
+
+  // 3. Connect to local Ganache / VotingContract
   const web3      = new Web3(GANACHE_URL);
   const accounts  = await web3.eth.getAccounts();
   const owner     = accounts[0];
@@ -152,70 +189,109 @@ async function main() {
       `[ERROR] VotingContract not deployed on Ganache network ${networkId}.\n` +
       `        Run: npx truffle migrate --network development`
     );
-    await db.end();
+    await disconnectGlobalDB();
     process.exit(1);
   }
 
   const contract = new web3.eth.Contract(contractJson.abi, deployed.address);
-  console.log(`[Blockchain] Contract : ${deployed.address}`);
-  console.log(`[Blockchain] Owner    : ${owner}\n`);
+  console.log(`[Blockchain] Contract  : ${deployed.address}`);
+  console.log(`[Blockchain] Owner     : ${owner}`);
+  console.log(`[Blockchain] FP threshold: ${FP_THRESHOLD}%\n`);
+  console.log(`${"─".repeat(65)}`);
 
   // 4. Process each record
-  let uploaded = 0, skipped = 0, errored = 0;
+  let uploaded = 0, rejected = 0, skipped = 0, errored = 0;
 
-  for (const row of rows) {
-    const { uid, hash2, voter_name } = row;
-    const label = `${uid} (${voter_name || "unknown"})`;
+  for (const row of records) {
+    const { uid, hash2, voterName } = row;
+    const label = `${uid} (${voterName || "unknown"})`;
 
-    // ── Layer 1: decrypt E2 → uid, e1, ts2 ──
+    // Decrypt E2 → uid, e1, ts2
     let e1, ts2;
     try {
-      const dec = decryptE2(hash2);
-      e1  = dec.e1;
-      ts2 = dec.ts2;
+      ({ e1, ts2 } = decryptE2(hash2));
     } catch (err) {
       console.log(`  ✗ ${label} — E2 decrypt failed: ${err.message}`);
       errored++;
       continue;
     }
 
-    // ── Layer 2: decrypt E1 → vote, ts1 ──
-    let vote, ts1;
+    // Decrypt E1 → f1, f2, vote, ts1
+    let f1, f2, vote, ts1;
     try {
-      const dec = decryptE1(e1);
-      vote = dec.vote;
-      ts1  = dec.ts1;
+      ({ f1, f2, vote, ts1 } = decryptE1(e1));
     } catch (err) {
       console.log(`  ✗ ${label} — E1 decrypt failed: ${err.message}`);
       errored++;
       continue;
     }
 
-    // ── Call castVote on-chain ──
+    // Fetch registered fingerprints from MongoDB Atlas
+    let globalRecord;
+    try {
+      globalRecord = await getVoterFingerprints(uid);
+      if (!globalRecord) {
+        console.log(`  ✗ ${label} — Not found in Global DB. Rejecting.`);
+        rejected++;
+        continue;
+      }
+    } catch (err) {
+      console.log(`  ✗ ${label} — Global DB error: ${err.message}`);
+      errored++;
+      continue;
+    }
+
+    // Fingerprint verification
+    const { passed, score1, score2 } = verifyFingerprints(
+      f1, f2,
+      globalRecord.fingerprint_1,
+      globalRecord.fingerprint_2,
+      FP_THRESHOLD
+    );
+
+    if (!passed) {
+      console.log(
+        `  ✗ ${label} — REJECTED  (F1: ${score1.toFixed(1)}%, F2: ${score2.toFixed(1)}%, threshold: ${FP_THRESHOLD}%)`
+      );
+      rejected++;
+      continue;
+    }
+
+    console.log(`  ✓ ${label} — VERIFIED  (F1: ${score1.toFixed(1)}%, F2: ${score2.toFixed(1)}%)`);
+
+    // castVote on-chain
     try {
       const tx = await contract.methods
         .castVote(uid, vote, e1, ts1, hash2, ts2)
         .send({ from: owner, gas: 3_000_000 });
 
-      console.log(`  ✓ ${label}  Vote="${vote}"  Tx=${tx.transactionHash}`);
+      console.log(`  ✓ ${label} — Vote="${vote}" → Block added. Tx=${tx.transactionHash}`);
       uploaded++;
     } catch (err) {
       const reason = err.message.match(/revert (.+)/)?.[1] || err.message;
-      console.log(`  ✗ ${label} — ${reason}`);
-      // "Vote already recorded" counts as a skip, not a hard error
-      if (reason.includes("already recorded")) skipped++;
-      else errored++;
+      if (reason.includes("already recorded")) {
+        console.log(`  ⚠ ${label} — Already on-chain (skipped).`);
+        skipped++;
+      } else {
+        console.log(`  ✗ ${label} — castVote error: ${reason}`);
+        errored++;
+      }
     }
+
+    console.log();
   }
 
   // 5. Summary
-  console.log(`\n${"─".repeat(55)}`);
-  console.log(`[Done]  Uploaded: ${uploaded}  Skipped: ${skipped}  Errors: ${errored}`);
+  console.log(`${"═".repeat(65)}`);
+  console.log(`[RESULTS]`);
+  console.log(`  ✓ Uploaded  : ${uploaded}`);
+  console.log(`  ✗ Rejected  : ${rejected}  (fingerprint mismatch or voter not found)`);
+  console.log(`  ⚠ Skipped   : ${skipped}  (already on-chain)`);
+  console.log(`  ✗ Errors    : ${errored}`);
 
-  if (uploaded > 0) {
+  if (uploaded > 0 || skipped > 0) {
     const total      = await contract.methods.getTotalVotes().call();
     const candidates = await contract.methods.getAllCandidates().call();
-
     console.log(`\n── On-Chain Tally ──`);
     console.log(`   Total votes: ${total}`);
     for (const c of candidates) {
@@ -224,10 +300,10 @@ async function main() {
     }
   }
 
-  await db.end();
+  await disconnectGlobalDB();
 }
 
 main().catch((err) => {
-  console.error("Fatal:", err.message);
+  console.error("\nFatal:", err.message);
   process.exit(1);
 });
