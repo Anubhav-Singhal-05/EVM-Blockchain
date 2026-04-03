@@ -2,26 +2,35 @@
  * blockchainService.js
  * ---------------------
  * Handles all interaction with the deployed VotingContract on Ganache.
- * Used by the /api/voters/upload-to-blockchain route.
+ * Called by the POST /api/voters/upload-to-blockchain route.
  *
- * Reads the compiled contract artifact from the Blockchain Software's
- * build directory (relative path configured via BLOCKCHAIN_BUILD_PATH).
+ * PIPELINE:
+ *  1. Decrypt E2 → uid, E1, TS2
+ *  2. Decrypt E1 → uid, F1, F2, V, TS1
+ *  3. Fetch registered fingerprints from Global MongoDB DB
+ *  4. Verify fingerprints (threshold configurable via FP_THRESHOLD env var)
+ *  5a. PASS → castVote on blockchain
+ *  5b. FAIL → record rejection, skip block
  */
 
 const Web3 = require("web3");
 const path = require("path");
-const { decryptFromHash } = require("./rsa");
+const { decryptFromHash }                          = require("./rsa");
+const { verifyFingerprints }                       = require("./fingerprintMatcher");
+const { connectGlobalDB, getVoterFingerprints }    = require("./globalDb");
 
-// ── Config (from .env) ─────────────────────────────────────────────
+// ── Config ─────────────────────────────────────────────────────────
 
-const GANACHE_URL         = process.env.GANACHE_URL         || "http://127.0.0.1:7545";
-const BLOCKCHAIN_BUILD    = process.env.BLOCKCHAIN_BUILD_PATH
-  || path.join(__dirname, "..", "..", "..", "..", "Blockchain Software", "blockchain", "build", "contracts");
+const GANACHE_URL      = process.env.GANACHE_URL          || "http://127.0.0.1:7545";
+const BLOCKCHAIN_BUILD = process.env.BLOCKCHAIN_BUILD_PATH ||
+  path.join(__dirname, "..", "..", "..", "..", "Blockchain Software", "blockchain", "build", "contracts");
 
-// E1 format after decryption: "uid||F1||F2||V||TS1"
-const SEP      = "||";
-const IDX_VOTE = Number(process.env.E1_VOTE_INDEX ?? 3);
-const IDX_TS1  = Number(process.env.E1_TS1_INDEX  ?? 4);
+const SEP          = "||";
+const IDX_F1       = Number(process.env.E1_F1_INDEX   ?? 1);
+const IDX_F2       = Number(process.env.E1_F2_INDEX   ?? 2);
+const IDX_VOTE     = Number(process.env.E1_VOTE_INDEX  ?? 3);
+const IDX_TS1      = Number(process.env.E1_TS1_INDEX   ?? 4);
+const FP_THRESHOLD = Number(process.env.FP_THRESHOLD   ?? 80);
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -37,11 +46,6 @@ function splitByDoublePipe(str) {
   return parts;
 }
 
-/**
- * Decrypt E2 (hash2) → { uid, e1, ts2 }
- * hash2 = encryptToHash("uid||h1_base64||ts2_iso")
- * h1 may itself contain "||", so we split on first and last occurrence.
- */
 function decryptE2(hash2) {
   const plain = decryptFromHash(hash2);
   const first = plain.indexOf(SEP);
@@ -56,29 +60,36 @@ function decryptE2(hash2) {
   };
 }
 
-/**
- * Decrypt E1 (h1) → { vote, ts1 }
- * h1 = encryptToHash("uid||F1||F2||V||TS1")
- */
 function decryptE1(h1) {
-  const plain  = decryptFromHash(h1);
-  const fields = splitByDoublePipe(plain);
-  if (fields.length <= Math.max(IDX_VOTE, IDX_TS1)) {
+  const plain    = decryptFromHash(h1);
+  const fields   = splitByDoublePipe(plain);
+  const required = Math.max(IDX_F1, IDX_F2, IDX_VOTE, IDX_TS1) + 1;
+  if (fields.length < required) {
     throw new Error(
-      `E1 has only ${fields.length} fields (need ≥${Math.max(IDX_VOTE,IDX_TS1)+1}): "${plain.slice(0,60)}..."`
+      `E1 has only ${fields.length} fields (need ≥${required}): "${plain.slice(0, 60)}..."`
     );
   }
-  return { vote: fields[IDX_VOTE], ts1: fields[IDX_TS1] };
+  return {
+    uid:  fields[0],
+    f1:   fields[IDX_F1],
+    f2:   fields[IDX_F2],
+    vote: fields[IDX_VOTE],
+    ts1:  fields[IDX_TS1],
+  };
 }
 
 // ── Main export ────────────────────────────────────────────────────
 
 /**
- * Upload all completed hash_records to the blockchain.
- * @param {Array} records  Rows from: SELECT hr.uid, hr.hash2, hr.created_at FROM hash_records hr
- * @returns {object}       { uploaded, skipped, errored, details[], tally{} }
+ * Upload all completed hash_records to the blockchain with fingerprint verification.
+ * @param {Array} records  - Rows: { uid, hash2 }
+ * @returns {object}       - { uploaded, rejected, skipped, errored, details[], tally{} }
  */
 async function uploadToBlockchain(records) {
+  // Connect to Global DB
+  await connectGlobalDB();
+
+  // Connect to blockchain
   const web3     = new Web3(GANACHE_URL);
   const accounts = await web3.eth.getAccounts();
   const owner    = accounts[0];
@@ -104,13 +115,13 @@ async function uploadToBlockchain(records) {
 
   const contract = new web3.eth.Contract(contractJson.abi, deployed.address);
 
-  let uploaded = 0, skipped = 0, errored = 0;
+  let uploaded = 0, rejected = 0, skipped = 0, errored = 0;
   const details = [];
 
   for (const row of records) {
     const { uid, hash2 } = row;
 
-    // Layer 1 — decrypt E2
+    // Layer 1 — Decrypt E2
     let e1, ts2;
     try {
       ({ e1, ts2 } = decryptE2(hash2));
@@ -120,13 +131,46 @@ async function uploadToBlockchain(records) {
       continue;
     }
 
-    // Layer 2 — decrypt E1
-    let vote, ts1;
+    // Layer 2 — Decrypt E1 → extract F1, F2, V, TS1
+    let f1, f2, vote, ts1;
     try {
-      ({ vote, ts1 } = decryptE1(e1));
+      ({ f1, f2, vote, ts1 } = decryptE1(e1));
     } catch (err) {
       details.push({ uid, status: "error", reason: `E1 decrypt: ${err.message}` });
       errored++;
+      continue;
+    }
+
+    // Fetch registered fingerprints from Global DB
+    let globalRecord;
+    try {
+      globalRecord = await getVoterFingerprints(uid);
+      if (!globalRecord) {
+        details.push({ uid, status: "rejected", vote, reason: "Voter not found in Global DB" });
+        rejected++;
+        continue;
+      }
+    } catch (err) {
+      details.push({ uid, status: "error", reason: `Global DB lookup: ${err.message}` });
+      errored++;
+      continue;
+    }
+
+    // Fingerprint verification
+    const { passed, score1, score2 } = verifyFingerprints(
+      f1, f2,
+      globalRecord.fingerprint_1,
+      globalRecord.fingerprint_2,
+      FP_THRESHOLD
+    );
+
+    if (!passed) {
+      details.push({
+        uid, status: "rejected", vote,
+        reason: `Fingerprint mismatch (F1: ${score1.toFixed(1)}%, F2: ${score2.toFixed(1)}%, threshold: ${FP_THRESHOLD}%)`,
+        fpScore1: score1, fpScore2: score2,
+      });
+      rejected++;
       continue;
     }
 
@@ -135,18 +179,25 @@ async function uploadToBlockchain(records) {
       const tx = await contract.methods
         .castVote(uid, vote, e1, ts1, hash2, ts2)
         .send({ from: owner, gas: 3_000_000 });
-      details.push({ uid, status: "uploaded", vote, txHash: tx.transactionHash });
+
+      details.push({
+        uid, status: "uploaded", vote, txHash: tx.transactionHash,
+        fpScore1: score1, fpScore2: score2,
+      });
       uploaded++;
     } catch (err) {
       const reason = err.message.match(/revert (.+)/)?.[1] || err.message;
       const isAlreadyRecorded = reason.includes("already recorded");
-      details.push({ uid, status: isAlreadyRecorded ? "skipped" : "error", reason, vote });
+      details.push({
+        uid, status: isAlreadyRecorded ? "skipped" : "error",
+        reason, vote, fpScore1: score1, fpScore2: score2,
+      });
       if (isAlreadyRecorded) skipped++;
       else errored++;
     }
   }
 
-  // Read tally from chain
+  // Read on-chain tally
   const tally = { total: 0, candidates: {} };
   try {
     tally.total      = Number(await contract.methods.getTotalVotes().call());
@@ -158,7 +209,9 @@ async function uploadToBlockchain(records) {
 
   return {
     contractAddress: deployed.address,
+    fpThreshold: FP_THRESHOLD,
     uploaded,
+    rejected,
     skipped,
     errored,
     details,

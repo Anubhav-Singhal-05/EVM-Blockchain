@@ -239,8 +239,12 @@ export default function AdminPanel({ user, onLogout }) {
                 {/* Summary row */}
                 <div className="stats-row" style={{ marginBottom: 24 }}>
                   <div className="stat-card">
-                    <p className="stat-label">Uploaded</p>
+                    <p className="stat-label">Uploaded ✓</p>
                     <p className="stat-value" style={{ color: "#68d391" }}>{blockchainResult.uploaded}</p>
+                  </div>
+                  <div className="stat-card">
+                    <p className="stat-label">FP Rejected ✗</p>
+                    <p className="stat-value" style={{ color: "#fc8181" }}>{blockchainResult.rejected ?? 0}</p>
                   </div>
                   <div className="stat-card">
                     <p className="stat-label">Already On-Chain</p>
@@ -254,6 +258,12 @@ export default function AdminPanel({ user, onLogout }) {
                     <p className="stat-label">On-Chain Total</p>
                     <p className="stat-value">{blockchainResult.tally?.total ?? "—"}</p>
                   </div>
+                  {blockchainResult.fpThreshold && (
+                    <div className="stat-card">
+                      <p className="stat-label">FP Threshold</p>
+                      <p className="stat-value" style={{ fontSize: 18 }}>{blockchainResult.fpThreshold}%</p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Contract address */}
@@ -293,7 +303,14 @@ export default function AdminPanel({ user, onLogout }) {
                     <div className="table-wrap">
                       <table>
                         <thead>
-                          <tr><th>UID</th><th>Status</th><th>Vote (V)</th><th>Tx Hash / Reason</th></tr>
+                          <tr>
+                            <th>UID</th>
+                            <th>Status</th>
+                            <th>Vote (V)</th>
+                            <th>FP Score F1</th>
+                            <th>FP Score F2</th>
+                            <th>Tx Hash / Reason</th>
+                          </tr>
                         </thead>
                         <tbody>
                           {blockchainResult.details.map((d) => (
@@ -304,12 +321,29 @@ export default function AdminPanel({ user, onLogout }) {
                                   ? <span className="badge green">Uploaded ✓</span>
                                   : d.status === "skipped"
                                   ? <span className="badge yellow">Already on-chain</span>
+                                  : d.status === "rejected"
+                                  ? <span className="badge" style={{ background: "#744210", color: "#fbd38d" }}>FP Rejected ✗</span>
                                   : <span className="badge" style={{ background: "#742a2a", color: "#feb2b2" }}>Error</span>}
                               </td>
                               <td className="mono">{d.vote || <span className="null">—</span>}</td>
-                              <td className="mono small">{d.txHash
-                                ? <span className="break">{d.txHash.substring(0, 20)}…</span>
-                                : <span style={{ color: "#fc8181" }}>{d.reason?.slice(0, 60)}</span>}
+                              <td className="small">
+                                {d.fpScore1 != null
+                                  ? <span style={{ color: d.fpScore1 > (blockchainResult.fpThreshold ?? 80) ? "#68d391" : "#fc8181" }}>
+                                      {d.fpScore1.toFixed(1)}%
+                                    </span>
+                                  : <span className="null">—</span>}
+                              </td>
+                              <td className="small">
+                                {d.fpScore2 != null
+                                  ? <span style={{ color: d.fpScore2 > (blockchainResult.fpThreshold ?? 80) ? "#68d391" : "#fc8181" }}>
+                                      {d.fpScore2.toFixed(1)}%
+                                    </span>
+                                  : <span className="null">—</span>}
+                              </td>
+                              <td className="mono small">
+                                {d.txHash
+                                  ? <span className="break">{d.txHash.substring(0, 20)}…</span>
+                                  : <span style={{ color: d.status === "rejected" ? "#fbd38d" : "#fc8181" }}>{d.reason?.slice(0, 55)}</span>}
                               </td>
                             </tr>
                           ))}
