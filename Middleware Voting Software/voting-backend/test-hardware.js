@@ -6,7 +6,7 @@
 const http = require("http");
 
 // ── CHANGE THESE AS NEEDED ────────────────────────────────────
-const VOTER_UID = "UID001";          // voter to simulate
+const VOTER_UID = "UID005";          // voter to simulate
 const FAKE_H1   = "HARDWAREHASH_ABC123XYZ_VOTE_ENCRYPTED"; // fake H1 from hardware
 // ─────────────────────────────────────────────────────────────
 

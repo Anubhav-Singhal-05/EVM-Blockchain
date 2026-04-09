@@ -5,7 +5,7 @@
     "dev": "concurrently -c \"cyan,magenta,yellow\" -n \"MOCK-CHAIN,GLOBAL-DB,FRONTEND\" \"npm run dev:api\" \"npm run dev:db\" \"npm run dev:frontend\"",
     "dev:api": "cd \"Blockchain Software/blockchain\" && node scripts/mock_api.js",
     "dev:db": "cd voting-global-db && node server.js",
-    "dev:frontend": "cd blockchain-voting && npm run dev"
+    "dev:frontend": "cd Voting Frontend && npm run dev"
   },
   "dependencies": {
     "mongoose": "^9.3.3"

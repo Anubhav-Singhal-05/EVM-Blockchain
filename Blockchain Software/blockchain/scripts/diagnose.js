@@ -1,7 +1,7 @@
 /**
  * diagnose.js  —  System Health Check
  * ─────────────────────────────────────────────────────────────────────
- * Tests every component of the EVM Blockchain bridge independently.
+ * Tests every component of the EVM Blockchain system independently.
  * Run this before running upload_votes.js to catch config issues early.
  *
  * Usage:
@@ -10,8 +10,8 @@
  * Checks performed:
  *   [1] .env configuration — required keys are present
  *   [2] Ganache — reachable and VotingContract is deployed
- *   [3] Middleware API — reachable and export endpoint responds
- *   [4] MongoDB Atlas — reachable and voters collection is queryable
+ *   [3] Middleware API (Device 2) — reachable and export endpoint responds
+ *   [4] voting-global-db (local) — reachable and fingerprint lookup works
  *   [5] RSA decryption — sanity check with a known round-trip
  *   [6] Fingerprint matcher — sanity check with identical and different templates
  */
@@ -39,11 +39,11 @@ function fail(msg) { console.log(`  ${R("✗")} ${msg}`); failed++; }
 function warn(msg) { console.log(`  ${Y("⚠")} ${msg}`); warned++; }
 function section(title) { console.log(`\n${B("─".repeat(60))}\n  ${B(title)}\n${B("─".repeat(60))}`); }
 
-// ── HTTP helper (identical to upload_votes.js) ────────────────────────
+// ── HTTP helper ───────────────────────────────────────────────────────
 function getJSON(url, headers = {}) {
   return new Promise((resolve, reject) => {
-    const lib     = url.startsWith("https") ? https : http;
-    const req     = lib.get(url, { headers }, (res) => {
+    const lib = url.startsWith("https") ? https : http;
+    const req = lib.get(url, { headers }, (res) => {
       let data = "";
       res.on("data", c => (data += c));
       res.on("end", () => {
@@ -67,12 +67,12 @@ async function checkConfig() {
     MIDDLEWARE_API_URL:  "URL of the Middleware backend (e.g. http://192.168.1.10:5000)",
     MIDDLEWARE_API_KEY:  "Shared API key (must match BLOCKCHAIN_API_KEY in middleware .env)",
     GANACHE_URL:         "Local Ganache RPC URL",
-    MONGODB_URI:         "MongoDB Atlas connection string",
+    GLOBAL_DB_API_URL:   "Local voting-global-db URL (e.g. http://localhost:3000)",
   };
 
   const optional = {
-    FP_THRESHOLD:    `Fingerprint match threshold % (default: 80, currently: ${process.env.FP_THRESHOLD ?? "not set → 80"})`,
-    E1_VOTE_INDEX:   `Vote field index in E1 (default: 3, currently: ${process.env.E1_VOTE_INDEX ?? "not set → 3"})`,
+    FP_THRESHOLD: `Fingerprint match threshold % (currently: ${process.env.FP_THRESHOLD ?? "not set → 80"})`,
+    API_PORT:     `Blockchain Data API port (currently: ${process.env.API_PORT ?? "not set → 4000"})`,
   };
 
   for (const [key, desc] of Object.entries(required)) {
@@ -91,8 +91,8 @@ async function checkGanache() {
   section("CHECK 2 — Ganache + VotingContract");
 
   const url = process.env.GANACHE_URL || "http://127.0.0.1:7545";
-
   let web3, accounts, networkId;
+
   try {
     web3      = new Web3(url);
     accounts  = await Promise.race([
@@ -136,39 +136,34 @@ async function checkGanache() {
 
 // ── TEST 3: Middleware API ────────────────────────────────────────────
 async function checkMiddlewareAPI() {
-  section("CHECK 3 — Middleware API (Device 2)");
+  section("CHECK 3 — Middleware API (Device 2 — over WiFi)");
 
   const base = (process.env.MIDDLEWARE_API_URL || "").replace(/\/$/, "");
   const key  = process.env.MIDDLEWARE_API_KEY || "";
 
   if (!base) { fail("MIDDLEWARE_API_URL not set — skipping"); return; }
 
-  // 3a. Basic reachability (health or root)
+  // 3a. Basic reachability
   try {
     await getJSON(`${base}/api/voters`, { "X-API-Key": key });
     ok(`Middleware server reachable at ${base}`);
   } catch (err) {
-    // A 4xx/5xx still means the server is up
     if (err.message.startsWith("HTTP")) {
       ok(`Middleware server reachable at ${base} (got ${err.message})`);
     } else {
       fail(`Cannot reach middleware at ${base} — ${err.message}`);
-      warn("Check that the Middleware is running and both machines are on the same network.");
+      warn("Check that the Middleware is running and both machines are on the same WiFi.");
       return;
     }
   }
 
-  // 3b. Export endpoint — no key
+  // 3b. Export endpoint — no key (should 401)
   try {
     await getJSON(`${base}/api/voters/export-for-blockchain`, {});
-    if (process.env.BLOCKCHAIN_API_KEY) {
-      warn("Export endpoint returned 200 with NO key — BLOCKCHAIN_API_KEY may not be set on middleware.");
-    } else {
-      ok("Export endpoint accessible (API key not configured — open access).");
-    }
+    warn("Export endpoint returned 200 with NO key — BLOCKCHAIN_API_KEY may not be set on middleware.");
   } catch (err) {
     if (err.message.includes("401")) {
-      ok("Export endpoint correctly returns 401 when no API key is provided.");
+      ok("Export endpoint correctly returns 401 without API key.");
     } else {
       fail(`Export endpoint error (no key): ${err.message}`);
     }
@@ -178,53 +173,53 @@ async function checkMiddlewareAPI() {
   try {
     const res = await getJSON(`${base}/api/voters/export-for-blockchain`, { "X-API-Key": key });
     const count = res.body.count ?? res.body.records?.length ?? "?";
-    ok(`Export endpoint returns ${count} completed vote record(s).`);
-    if (count === 0) warn("No completed votes yet — ask the voting official to process some votes first.");
+    ok(`Export endpoint → ${count} completed vote record(s).`);
+    if (count === 0) warn("No completed votes yet — process some votes on Device 2 first.");
   } catch (err) {
     fail(`Export endpoint with API key failed: ${err.message}`);
   }
 }
 
-// ── TEST 4: MongoDB Atlas ─────────────────────────────────────────────
-async function checkMongoDB() {
-  section("CHECK 4 — MongoDB Atlas (Global Voter DB)");
+// ── TEST 4: voting-global-db (local HTTP API) ────────────────────────
+async function checkGlobalDB() {
+  section("CHECK 4 — voting-global-db (local HTTP API)");
 
-  const uri = process.env.MONGODB_URI;
-  if (!uri) { fail("MONGODB_URI not set — skipping"); return; }
+  const url = (process.env.GLOBAL_DB_API_URL || "http://localhost:3000").replace(/\/$/, "");
 
+  // 4a. Reachability
   try {
-    console.log(`  ${DIM("Connecting to MongoDB Atlas... (up to 10s)")}`);
     await connectGlobalDB();
-    ok("Connected to MongoDB Atlas.");
-
-    // Count voters
-    const { default: mongoose } = await Promise.resolve(require("mongoose"));
-    const count = await mongoose.connection.db.collection("voters").countDocuments();
-    ok(`voters collection has ${count} document(s).`);
-
-    if (count === 0) {
-      warn("No voters found in Global DB — fingerprint verification will reject all votes.");
-    } else {
-      // Try to fetch one
-      const sample = await mongoose.connection.db.collection("voters").findOne({});
-      ok(`Sample document keys: ${Object.keys(sample).join(", ")}`);
-      if (!sample.fingerprint_1 || !sample.fingerprint_2) {
-        warn("Sample document is missing fingerprint_1 / fingerprint_2 fields.");
-      } else {
-        ok(`Fingerprint fields present. Sample fingerprint_1: ${DIM(String(sample.fingerprint_1).slice(0, 30))}…`);
-
-        // Try getVoterFingerprints
-        if (sample.voterId) {
-          const fp = await getVoterFingerprints(sample.voterId);
-          ok(`getVoterFingerprints("${sample.voterId}") returned: F1=${DIM(String(fp?.fingerprint_1).slice(0, 20))}…`);
-        }
-      }
-    }
-    await disconnectGlobalDB();
+    ok(`voting-global-db reachable at ${url}`);
   } catch (err) {
-    fail(`MongoDB connection failed: ${err.message}`);
-    warn("Check MONGODB_URI and ensure your IP is whitelisted in Atlas (or set to 0.0.0.0/0).");
+    fail(`Cannot reach voting-global-db: ${err.message}`);
+    warn("Run: cd voting-global-db && node server.js");
+    return;
   }
+
+  // 4b. Fetch all voters to check count
+  try {
+    const res = await getJSON(`${url}/api/voters`);
+    const count = Array.isArray(res.body) ? res.body.length : "?";
+    ok(`Voters in Global DB: ${count}`);
+    if (count === 0) warn("No voters found — fingerprint verification will reject all votes.");
+  } catch (err) {
+    fail(`GET /api/voters failed: ${err.message}`);
+    return;
+  }
+
+  // 4c. Test fingerprint lookup for a known voter
+  try {
+    const fp = await getVoterFingerprints("VOTER001");
+    if (fp) {
+      ok(`getVoterFingerprints("VOTER001") → F1=${DIM(String(fp.fingerprint_1).slice(0, 25))}, F2=${DIM(String(fp.fingerprint_2).slice(0, 25))}`);
+    } else {
+      warn("VOTER001 not found — sample data may not be seeded yet.");
+    }
+  } catch (err) {
+    fail(`Fingerprint lookup failed: ${err.message}`);
+  }
+
+  await disconnectGlobalDB();
 }
 
 // ── TEST 5: RSA decryption ────────────────────────────────────────────
@@ -241,8 +236,6 @@ async function checkRSA() {
       ok(`  Encrypted: ${DIM(encrypted.slice(0, 40))}…`);
     } else {
       fail("RSA round-trip: decrypted value does NOT match original.");
-      console.log(`    Original : ${testPayload}`);
-      console.log(`    Decrypted: ${decrypted}`);
     }
   } catch (err) {
     fail(`RSA test threw: ${err.message}`);
@@ -253,33 +246,29 @@ async function checkRSA() {
 async function checkFingerprintMatcher() {
   section("CHECK 6 — Fingerprint Matcher");
 
-  // 6a. Identical mock strings
   const score1 = matchScore("MOCK_F1_18", "MOCK_F1_18");
   score1 === 100
     ? ok(`Identical mock strings → score = ${score1}% (expected 100%)`)
     : fail(`Identical mock strings → score = ${score1}% (expected 100%)`);
 
-  // 6b. Different mock strings
   const score2 = matchScore("MOCK_F1_18", "MOCK_F1_99");
   score2 < 80
     ? ok(`Different mock strings → score = ${score2}% (expected < 80%)`)
-    : warn(`Different mock strings → score = ${score2}% — these are suspiciously similar`);
+    : warn(`Different mock strings → score = ${score2}% — suspiciously similar`);
 
-  // 6c. Real-ish base64 (512 bytes of random data)
   const buf1 = Buffer.alloc(512, 0xAB);
   const buf2 = Buffer.alloc(512, 0xAB);
-  buf2[100] = 0x00;  // flip one byte
+  buf2[100] = 0x00;
   const score3 = matchScore(buf1.toString("base64"), buf2.toString("base64"));
   score3 > 98
-    ? ok(`512-byte buffers (1 byte diff) → score = ${score3.toFixed(2)}% (high similarity, correct)`)
+    ? ok(`512-byte buffers (1 byte diff) → score = ${score3.toFixed(2)}% (high similarity ✓)`)
     : warn(`512-byte buffers (1 byte diff) → score = ${score3.toFixed(2)}%`);
 
-  // 6d. Completely different buffers
   const buf3 = Buffer.alloc(512, 0x00);
   const buf4 = Buffer.alloc(512, 0xFF);
   const score4 = matchScore(buf3.toString("base64"), buf4.toString("base64"));
   score4 === 0
-    ? ok(`Inverse buffers (all 0x00 vs all 0xFF) → score = ${score4}% (expected 0%)`)
+    ? ok(`Inverse buffers (0x00 vs 0xFF) → score = ${score4}% (expected 0%)`)
     : warn(`Inverse buffers → score = ${score4}% (expected 0%)`);
 }
 
@@ -292,7 +281,7 @@ async function main() {
   await checkConfig();
   await checkGanache();
   await checkMiddlewareAPI();
-  await checkMongoDB();
+  await checkGlobalDB();
   await checkRSA();
   await checkFingerprintMatcher();
 
@@ -305,9 +294,9 @@ async function main() {
   console.log();
 
   if (failed === 0 && warned === 0) {
-    console.log(G("  ✓ All checks passed! You can run: node scripts/upload_votes.js"));
+    console.log(G("  ✓ All checks passed! Run: npm run upload"));
   } else if (failed === 0) {
-    console.log(Y("  ⚠ No failures, but review warnings before running upload_votes.js"));
+    console.log(Y("  ⚠ No failures, but review warnings above."));
   } else {
     console.log(R(`  ✗ ${failed} check(s) failed. Fix the issues above before uploading.`));
   }
