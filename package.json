@@ -1,5 +1,16 @@
 {
+  "name": "evm-blockchain-workspace",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "concurrently -c \"cyan,magenta,yellow\" -n \"MOCK-CHAIN,GLOBAL-DB,FRONTEND\" \"npm run dev:api\" \"npm run dev:db\" \"npm run dev:frontend\"",
+    "dev:api": "cd \"Blockchain Software/blockchain\" && node scripts/mock_api.js",
+    "dev:db": "cd voting-global-db && node server.js",
+    "dev:frontend": "cd blockchain-voting && npm run dev"
+  },
   "dependencies": {
     "mongoose": "^9.3.3"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
   }
 }
