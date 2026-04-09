@@ -308,59 +308,35 @@ router.delete("/clear", async (req, res) => {
   }
 });
 
-// ── GET /api/voters/export-for-blockchain ────────────────────────────
-// Called REMOTELY by the Blockchain machine (Device 3).
-// Returns all completed vote records (uid + hash2) so the blockchain
-// script can fetch them over HTTP instead of connecting directly to MySQL.
-//
-// Protected by a shared API key in the X-API-Key header.
-// Set BLOCKCHAIN_API_KEY in .env to a strong random secret.
-router.get("/export-for-blockchain", async (req, res) => {
+// ── POST /api/voters/upload-to-blockchain ─────────────────────
+// Bridge: reads completed hash_records from DB, performs two-layer
+// RSA decryption, and calls VotingContract.castVote() on Ganache.
+router.post("/upload-to-blockchain", async (req, res) => {
   try {
-    // ── API key auth ──────────────────────────────────────────────
-    const expectedKey = process.env.BLOCKCHAIN_API_KEY;
-    if (expectedKey) {
-      const provided = req.headers["x-api-key"];
-      if (!provided || provided !== expectedKey) {
-        return res.status(401).json({ error: "Unauthorized: invalid or missing X-API-Key header" });
-      }
-    }
-
     const [records] = await pool.execute(`
-      SELECT hr.uid, hr.hash2, hr.created_at AS createdAt, v.name AS voterName
+      SELECT hr.uid, hr.hash2, hr.created_at
       FROM hash_records hr
       INNER JOIN voters v ON v.uid = hr.uid
       WHERE v.vote_processed = 1
       ORDER BY hr.created_at ASC
     `);
 
+    if (records.length === 0) {
+      return res.json({
+        message: "No completed votes found in database. Process some votes first.",
+        uploaded: 0, skipped: 0, errored: 0, details: [], tally: { total: 0, candidates: {} },
+      });
+    }
+
+    const result = await uploadToBlockchain(records);
     res.json({
-      count:   records.length,
-      records,
+      message: `Upload complete. ${result.uploaded} uploaded, ${result.skipped} skipped, ${result.errored} errors.`,
+      ...result,
     });
   } catch (err) {
-    console.error("[Export Error]", err.message);
+    console.error("[Blockchain Upload Error]", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── POST /api/voters/upload-to-blockchain ─────────────────────────
-// NOTE: In the 3-device architecture, the actual blockchain upload
-// is performed by the Blockchain machine (Device 3) by calling
-// GET /api/voters/export-for-blockchain to fetch records and then
-// running upload_votes.js locally.
-//
-// This route is kept for reference only. The Admin Panel button
-// that called this has been updated to explain the correct flow.
-router.post("/upload-to-blockchain", async (req, res) => {
-  res.status(503).json({
-    message:
-      "In the 3-device architecture, blockchain uploads are performed " +
-      "directly from the Blockchain machine (Device 3). " +
-      "Run `node scripts/upload_votes.js` on that machine, or " +
-      "call GET /api/voters/export-for-blockchain from the blockchain script.",
-  });
-});
-
-module.exports = router;
-
+module.exports = router;
