@@ -6,8 +6,8 @@
 const http = require("http");
 
 // ── CHANGE THESE AS NEEDED ────────────────────────────────────
-const VOTER_UID = "UID005";          // voter to simulate
-const FAKE_H1   = "HARDWAREHASH_ABC123XYZ_VOTE_ENCRYPTED"; // fake H1 from hardware
+const VOTER_UID = "UID002";          // voter to simulate
+const FAKE_H1 = "HARDWAREHASH_ABC123XYZ_VOTE_ENCRYPTED"; // fake H1 from hardware
 // ─────────────────────────────────────────────────────────────
 
 function post(path, body) {
@@ -15,11 +15,11 @@ function post(path, body) {
     const data = JSON.stringify(body);
     const options = {
       hostname: "localhost",
-      port:     5000,
-      path:     path,
-      method:   "POST",
+      port: 5000,
+      path: path,
+      method: "POST",
       headers: {
-        "Content-Type":   "application/json",
+        "Content-Type": "application/json",
         "Content-Length": Buffer.byteLength(data),
       },
     };
@@ -56,7 +56,7 @@ async function runTest() {
   try {
     res = await post("/api/voters/receive-h1", {
       uid: VOTER_UID,
-      h1:  FAKE_H1,
+      h1: FAKE_H1,
     });
   } catch (err) {
     console.error("❌ Could not connect to backend. Is it running on port 5000?");

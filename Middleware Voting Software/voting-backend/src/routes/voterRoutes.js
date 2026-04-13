@@ -1,9 +1,16 @@
-const express                    = require("express");
-const router                     = express.Router();
-const pool                       = require("../db/pool");
-const { encryptToHash }          = require("../utils/rsa");
+const express           = require("express");
+const router            = express.Router();
+const pool              = require("../db/pool");
+const { encryptToHash } = require("../utils/rsa");
+const { MongoClient }   = require("mongodb");
+const serialHandler     = require("../utils/serialHandler");
 
 const TIMEOUT_SECONDS = 60;
+
+// ── MongoDB connection details ────────────────────────────────
+const MONGO_URI        = "mongodb+srv://anubhav:anubhav123@cluster0.lvukftp.mongodb.net/test";
+const MONGO_DB_NAME    = "test";
+const MONGO_COLLECTION = "voters";
 
 // ── maps DB row → frontend shape ─────────────────────────────
 function rowToVoter(row) {
@@ -20,14 +27,14 @@ function rowToVoter(row) {
   };
 }
 
-// ── check if a voter's session has timed out ─────────────────
+// ── check if session timed out ────────────────────────────────
 function isTimedOut(voter) {
   if (!voter.initiated_at) return false;
   const elapsed = (Date.now() - new Date(voter.initiated_at).getTime()) / 1000;
   return elapsed > TIMEOUT_SECONDS;
 }
 
-// ── reset voter back to completely clean state ────────────────
+// ── reset voter to clean state ────────────────────────────────
 async function resetVoter(uid) {
   await pool.execute(
     `UPDATE voters
@@ -44,23 +51,61 @@ async function resetVoter(uid) {
 
 // ── POST /api/voters/seed ─────────────────────────────────────
 router.post("/seed", async (req, res) => {
+  let client;
   try {
-    const seedData = [
-      { uid: "UID001", name: "Arjun Sharma" },
-      { uid: "UID002", name: "Priya Patel" },
-      { uid: "UID003", name: "Rahul Verma" },
-      { uid: "UID004", name: "Neha Singh" },
-      { uid: "UID005", name: "Amit Kumar" },
-    ];
-    for (const v of seedData) {
-      await pool.execute(
+    console.log("🔗 Connecting to MongoDB...");
+    client = new MongoClient(MONGO_URI);
+    await client.connect();
+
+    const db         = client.db(MONGO_DB_NAME);
+    const collection = db.collection(MONGO_COLLECTION);
+
+    const mongoVoters = await collection.find({}).toArray();
+
+    if (mongoVoters.length === 0)
+      return res.status(404).json({ error: "No voters found in MongoDB" });
+
+    console.log(`📦 Found ${mongoVoters.length} voters in MongoDB`);
+
+    let inserted = 0;
+    let skipped  = 0;
+
+    for (const v of mongoVoters) {
+      const uid  = v.vid;
+      const name = `${v.firstName} ${v.lastName}`.trim();
+
+      if (!uid || !name) {
+        console.log(`⚠️  Skipping — missing vid or name:`, v);
+        skipped++;
+        continue;
+      }
+
+      const [result] = await pool.execute(
         "INSERT IGNORE INTO voters (uid, name) VALUES (?, ?)",
-        [v.uid, v.name]
+        [uid, name]
       );
+
+      if (result.affectedRows > 0) {
+        inserted++;
+        console.log(`✅ Inserted: ${uid} — ${name}`);
+      } else {
+        skipped++;
+        console.log(`⏭️  Skipped (already exists): ${uid}`);
+      }
     }
-    res.json({ message: "Seed data loaded", count: seedData.length });
+
+    res.json({
+      message:  "Voters loaded from MongoDB",
+      total:    mongoVoters.length,
+      inserted,
+      skipped,
+    });
+
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error("❌ MongoDB fetch error:", err.message);
+    res.status(500).json({ error: `MongoDB error: ${err.message}` });
+  } finally {
+    if (client) await client.close();
   }
 });
 
@@ -92,7 +137,6 @@ router.get("/search", async (req, res) => {
 
     const voter = rows[0];
 
-    // auto-reset if timed out or stale (no initiated_at) when officer searches
     if (voter.hardware_initiated && !voter.vote_processed) {
       if (!voter.initiated_at || isTimedOut(voter)) {
         await resetVoter(voter.uid);
@@ -118,7 +162,7 @@ router.post("/initiate", async (req, res) => {
 
     const uidClean = uid.toUpperCase().trim();
 
-    // ── check if any OTHER voter is currently active ──────────
+    // check if any OTHER voter is currently active
     const [activeRows] = await pool.execute(
       `SELECT * FROM voters
        WHERE hardware_initiated = 1
@@ -129,13 +173,10 @@ router.post("/initiate", async (req, res) => {
 
     if (activeRows.length > 0) {
       const active = activeRows[0];
-
       if (!active.initiated_at || isTimedOut(active)) {
-        // other voter's session is stale or timed out → reset them silently
         await resetVoter(active.uid);
         console.log(`⏰ Stale session cleared for ${active.uid}`);
       } else {
-        // other voter is still actively voting → block
         const elapsed = Math.floor(
           (Date.now() - new Date(active.initiated_at).getTime()) / 1000
         );
@@ -146,7 +187,6 @@ router.post("/initiate", async (req, res) => {
       }
     }
 
-    // ── fetch the voter to initiate ───────────────────────────
     const [rows] = await pool.execute(
       "SELECT * FROM voters WHERE uid = ?",
       [uidClean]
@@ -157,17 +197,13 @@ router.post("/initiate", async (req, res) => {
 
     const voter = rows[0];
 
-    // already fully voted → block permanently
     if (voter.vote_processed)
       return res.status(400).json({ error: "Vote already processed for this voter" });
 
-    // has hardware_initiated flag set
     if (voter.hardware_initiated && !voter.vote_processed) {
       if (!voter.initiated_at || isTimedOut(voter)) {
-        // ── stale data (no initiated_at) OR timed out → reset and allow ──
         await resetVoter(uidClean);
       } else {
-        // ── session still valid and within timeout window → block ──
         const elapsed = Math.floor(
           (Date.now() - new Date(voter.initiated_at).getTime()) / 1000
         );
@@ -178,12 +214,15 @@ router.post("/initiate", async (req, res) => {
       }
     }
 
-    // ── all clear — initiate fresh session ───────────────────
+    // ── initiate fresh session ────────────────────────────────
     const now = new Date();
     await pool.execute(
       "UPDATE voters SET hardware_initiated = 1, initiated_at = ? WHERE uid = ?",
       [now, uidClean]
     );
+
+    // ── tell hardware to start voting session ─────────────────
+    serialHandler.sendStart(voter.uid, voter.name);
 
     res.json({
       message:      `Hardware initiated for ${voter.name} (${voter.uid})`,
@@ -204,6 +243,7 @@ router.post("/receive-h1", async (req, res) => {
       return res.status(400).json({ error: "uid and h1 required" });
 
     const uidClean = uid.toUpperCase().trim();
+
     const [rows] = await pool.execute(
       "SELECT * FROM voters WHERE uid = ?",
       [uidClean]
@@ -217,7 +257,6 @@ router.post("/receive-h1", async (req, res) => {
     if (!voter.hardware_initiated)
       return res.status(400).json({ error: "Hardware not initiated" });
 
-    // reject if timed out before accepting vote
     if (!voter.initiated_at || isTimedOut(voter)) {
       await resetVoter(uidClean);
       return res.status(408).json({
@@ -226,30 +265,78 @@ router.post("/receive-h1", async (req, res) => {
       });
     }
 
-    // save H1 + T2 into Database 1
+    // ── STEP 1: save H1 + T2 into DB1 strictly first ─────────
     const t2 = new Date();
-    await pool.execute(
-      `UPDATE voters
-       SET hash1 = ?, timestamp2 = ?, vote_processed = 1, initiated_at = NULL
-       WHERE uid = ?`,
-      [h1, t2, uidClean]
+    console.log(`📝 Step 1 — Saving H1 + T2 to DB1 for ${uidClean}...`);
+
+    try {
+      await pool.execute(
+        `UPDATE voters
+         SET hash1          = ?,
+             timestamp2     = ?,
+             vote_processed = 1,
+             initiated_at   = NULL
+         WHERE uid = ?`,
+        [h1, t2, uidClean]
+      );
+    } catch (db1Error) {
+      console.error(`❌ DB1 write failed for ${uidClean}:`, db1Error.message);
+      return res.status(500).json({
+        error:  "Failed to save vote in Database 1. Database 2 was NOT updated.",
+        detail: db1Error.message,
+      });
+    }
+
+    console.log(`✅ Step 1 done — H1 + T2 saved in DB1`);
+
+    // ── verify DB1 saved ──────────────────────────────────────
+    const [verify] = await pool.execute(
+      "SELECT hash1, timestamp2, vote_processed FROM voters WHERE uid = ?",
+      [uidClean]
     );
 
-    // RSA encrypt → save into Database 2
-    const hash2 = encryptToHash(`${uidClean}||${h1}||${t2.toISOString()}`);
-    await pool.execute(
-      `INSERT INTO hash_records (uid, hash2)
-       VALUES (?, ?)
-       ON DUPLICATE KEY UPDATE hash2 = VALUES(hash2)`,
-      [uidClean, hash2]
-    );
+    if (!verify[0].hash1 || !verify[0].vote_processed) {
+      console.error(`❌ DB1 verification failed for ${uidClean}`);
+      return res.status(500).json({
+        error: "Database 1 verification failed. Database 2 was NOT updated.",
+      });
+    }
+
+    console.log(`✅ Step 1 verified — DB1 record confirmed`);
+
+    // ── STEP 2: RSA encrypt D1 → save into DB2 ───────────────
+    console.log(`🔐 Step 2 — RSA encrypting and saving to DB2 for ${uidClean}...`);
+
+    const d1    = `${uidClean}||${h1}||${t2.toISOString()}`;
+    const hash2 = encryptToHash(d1);
+
+    try {
+      await pool.execute(
+        `INSERT INTO hash_records (uid, hash2)
+         VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE hash2 = VALUES(hash2)`,
+        [uidClean, hash2]
+      );
+    } catch (db2Error) {
+      console.error(`❌ DB2 write failed for ${uidClean}:`, db2Error.message);
+      return res.status(500).json({
+        error:  "Vote saved in Database 1 but failed to encrypt into Database 2.",
+        detail: db2Error.message,
+        db1:    { uid: uidClean, hash1: h1, timestamp2: t2 },
+      });
+    }
+
+    console.log(`✅ Step 2 done — Hash2 saved in DB2`);
+    console.log(`🎉 Both databases updated successfully for ${uidClean}`);
 
     res.json({
       message: `Vote received and encrypted for ${voter.name}`,
-      db1: { uid: uidClean, hash1: h1, timestamp2: t2 },
-      db2: { uid: uidClean, hash2 },
+      db1:     { uid: uidClean, hash1: h1, timestamp2: t2 },
+      db2:     { uid: uidClean, hash2 },
     });
+
   } catch (err) {
+    console.error("receive-h1 error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -261,6 +348,7 @@ router.post("/timeout", async (req, res) => {
     if (!uid) return res.status(400).json({ error: "UID required" });
 
     const uidClean = uid.toUpperCase().trim();
+
     const [rows] = await pool.execute(
       "SELECT * FROM voters WHERE uid = ?",
       [uidClean]
@@ -307,41 +395,83 @@ router.delete("/clear", async (req, res) => {
   }
 });
 
-// ── GET /api/voters/export-for-blockchain ────────────────────────────
-// Called REMOTELY by the Blockchain machine over WiFi.
-// Returns all completed vote records (uid + hash2) so the blockchain
-// script can fetch them over HTTP instead of connecting directly to MySQL.
-//
-// Protected by a shared API key in the X-API-Key header.
-// Set BLOCKCHAIN_API_KEY in .env to a strong random secret.
-router.get("/export-for-blockchain", async (req, res) => {
+// ── AUTO PROCESS H1 when hardware sends via serial ────────────
+serialHandler.setOnH1Received(async ({ uid, h1 }) => {
+  console.log(`🔄 Auto-processing H1 for ${uid} from hardware...`);
   try {
-    // ── API key auth ──────────────────────────────────────────────
-    const expectedKey = process.env.BLOCKCHAIN_API_KEY;
-    if (expectedKey) {
-      const provided = req.headers["x-api-key"];
-      if (!provided || provided !== expectedKey) {
-        return res.status(401).json({ error: "Unauthorized: invalid or missing X-API-Key header" });
-      }
+    const uidClean = uid.toUpperCase().trim();
+
+    const [rows] = await pool.execute(
+      "SELECT * FROM voters WHERE uid = ?",
+      [uidClean]
+    );
+
+    if (rows.length === 0) {
+      console.error(`❌ Voter ${uidClean} not found`);
+      return;
     }
 
-    const [records] = await pool.execute(`
-      SELECT hr.uid, hr.hash2, hr.created_at AS createdAt, v.name AS voterName
-      FROM hash_records hr
-      INNER JOIN voters v ON v.uid = hr.uid
-      WHERE v.vote_processed = 1
-      ORDER BY hr.created_at ASC
-    `);
+    const voter = rows[0];
 
-    res.json({
-      count:   records.length,
-      records,
-    });
+    if (!voter.hardware_initiated) {
+      console.error(`❌ Hardware not initiated for ${uidClean}`);
+      return;
+    }
+
+    if (!voter.initiated_at || isTimedOut(voter)) {
+      await resetVoter(uidClean);
+      console.error(`❌ Session timed out for ${uidClean}`);
+      return;
+    }
+
+    // STEP 1 — save to DB1
+    const t2 = new Date();
+    console.log(`📝 Step 1 — Saving H1 + T2 to DB1 for ${uidClean}...`);
+
+    await pool.execute(
+      `UPDATE voters
+       SET hash1          = ?,
+           timestamp2     = ?,
+           vote_processed = 1,
+           initiated_at   = NULL
+       WHERE uid = ?`,
+      [h1, t2, uidClean]
+    );
+
+    console.log(`✅ Step 1 done — DB1 updated`);
+
+    // verify DB1
+    const [verify] = await pool.execute(
+      "SELECT hash1, vote_processed FROM voters WHERE uid = ?",
+      [uidClean]
+    );
+
+    if (!verify[0].hash1 || !verify[0].vote_processed) {
+      console.error(`❌ DB1 verification failed for ${uidClean}`);
+      return;
+    }
+
+    console.log(`✅ Step 1 verified — DB1 confirmed`);
+
+    // STEP 2 — RSA encrypt → DB2
+    console.log(`🔐 Step 2 — RSA encrypting and saving to DB2 for ${uidClean}...`);
+
+    const d1    = `${uidClean}||${h1}||${t2.toISOString()}`;
+    const hash2 = encryptToHash(d1);
+
+    await pool.execute(
+      `INSERT INTO hash_records (uid, hash2)
+       VALUES (?, ?)
+       ON DUPLICATE KEY UPDATE hash2 = VALUES(hash2)`,
+      [uidClean, hash2]
+    );
+
+    console.log(`✅ Step 2 done — DB2 updated`);
+    console.log(`🎉 Vote fully processed for ${voter.name} (${uidClean})`);
+
   } catch (err) {
-    console.error("[Export Error]", err.message);
-    res.status(500).json({ error: err.message });
+    console.error(`❌ Auto H1 processing error for ${uid}:`, err.message);
   }
 });
 
 module.exports = router;
-

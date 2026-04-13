@@ -4,15 +4,15 @@ import axios from "axios";
 const API = "/api/voters";
 
 export default function AdminPanel({ user, onLogout }) {
-  const [voters, setVoters]                   = useState([]);
-  const [hashRecords, setHashRecords]         = useState([]);
-  const [message, setMessage]                 = useState({ text: "", type: "" });
-  const [loading, setLoading]                 = useState(false);
-  const [activeTab, setActiveTab]             = useState("db1");
-  const [seeded, setSeeded]                   = useState(false);
+  const [voters, setVoters] = useState([]);
+  const [hashRecords, setHashRecords] = useState([]);
+  const [message, setMessage] = useState({ text: "", type: "" });
+  const [loading, setLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState("db1");
+  const [seeded, setSeeded] = useState(false);
   const [blockchainResult, setBlockchainResult] = useState(null);
-  const [uploading, setUploading]             = useState(false);
-  const pollRef                               = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const pollRef = useRef(null);
 
   useEffect(() => {
     fetchAll();
@@ -59,32 +59,32 @@ export default function AdminPanel({ user, onLogout }) {
     setLoading(false);
   };
 
-  const handleUploadToBlockchain = async () => {
-    if (!window.confirm(
-      "Upload all completed votes to the blockchain?\n\n" +
-      "Make sure Ganache is running and the contract is deployed before proceeding."
-    )) return;
+  // const handleUploadToBlockchain = async () => {
+  //   if (!window.confirm(
+  //     "Upload all completed votes to the blockchain?\n\n" +
+  //     "Make sure Ganache is running and the contract is deployed before proceeding."
+  //   )) return;
 
-    setUploading(true);
-    setBlockchainResult(null);
-    try {
-      const res = await axios.post(`${API}/upload-to-blockchain`);
-      setBlockchainResult(res.data);
-      showMsg(res.data.message, res.data.errored > 0 ? "error" : "success");
-      setActiveTab("blockchain");
-    } catch (err) {
-      const msg = err.response?.data?.error || err.message;
-      showMsg(`Blockchain upload failed: ${msg}`, "error");
-      setBlockchainResult({ error: msg });
-      setActiveTab("blockchain");
-    }
-    setUploading(false);
-  };
+  //   setUploading(true);
+  //   setBlockchainResult(null);
+  //   try {
+  //     const res = await axios.post(`${API}/upload-to-blockchain`);
+  //     setBlockchainResult(res.data);
+  //     showMsg(res.data.message, res.data.errored > 0 ? "error" : "success");
+  //     setActiveTab("blockchain");
+  //   } catch (err) {
+  //     const msg = err.response?.data?.error || err.message;
+  //     showMsg(`Blockchain upload failed: ${msg}`, "error");
+  //     setBlockchainResult({ error: msg });
+  //     setActiveTab("blockchain");
+  //   }
+  //   setUploading(false);
+  // };
 
-  const totalVoters   = voters.length;
-  const initiated     = voters.filter((v) => v.hardwareInitiated).length;
+  const totalVoters = voters.length;
+  const initiated = voters.filter((v) => v.hardwareInitiated).length;
   const voteProcessed = voters.filter((v) => v.voteProcessed).length;
-  const pending       = totalVoters - voteProcessed;
+  const pending = totalVoters - voteProcessed;
 
   return (
     <div className="app">
@@ -115,14 +115,14 @@ export default function AdminPanel({ user, onLogout }) {
           </div>
           <div className="admin-actions">
             {!seeded && <button className="seed-btn" onClick={handleSeed} disabled={loading}>📥 Load Voters</button>}
-            <button
+            {/* <button
               className="seed-btn"
               onClick={handleUploadToBlockchain}
               disabled={uploading || voteProcessed === 0}
               title={voteProcessed === 0 ? "No processed votes to upload" : "Upload all completed votes to Ganache blockchain"}
             >
               {uploading ? "⏳ Uploading…" : "📤 Upload to Blockchain"}
-            </button>
+            </button> */}
             <button className="clear-btn" onClick={handleClear} disabled={loading}>🗑️ Clear All Data</button>
           </div>
         </div>
@@ -135,8 +135,8 @@ export default function AdminPanel({ user, onLogout }) {
         </div>
 
         <div className="tabs">
-          <button className={activeTab === "db1"        ? "tab active" : "tab"} onClick={() => setActiveTab("db1")}>🗄️ Database 1 — Voters</button>
-          <button className={activeTab === "db2"        ? "tab active" : "tab"} onClick={() => setActiveTab("db2")}>
+          <button className={activeTab === "db1" ? "tab active" : "tab"} onClick={() => setActiveTab("db1")}>🗄️ Database 1 — Voters</button>
+          <button className={activeTab === "db2" ? "tab active" : "tab"} onClick={() => setActiveTab("db2")}>
             🔐 Database 2 — Encrypted
             {hashRecords.length > 0 && (
               <span style={{ marginLeft: 8, background: "#2c5282", color: "#90cdf4", fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 20 }}>
@@ -144,14 +144,14 @@ export default function AdminPanel({ user, onLogout }) {
               </span>
             )}
           </button>
-          <button className={activeTab === "blockchain" ? "tab active" : "tab"} onClick={() => setActiveTab("blockchain")}>
+          {/* <button className={activeTab === "blockchain" ? "tab active" : "tab"} onClick={() => setActiveTab("blockchain")}>
             ⛓️ Blockchain Upload
             {blockchainResult?.uploaded > 0 && (
               <span style={{ marginLeft: 8, background: "#22543d", color: "#9ae6b4", fontSize: 10, fontWeight: 700, padding: "2px 7px", borderRadius: 20 }}>
                 {blockchainResult.uploaded} ✓
               </span>
             )}
-          </button>
+          </button> */}
         </div>
 
         {/* ── Database 1 tab ─────────────────────────────────────────── */}
@@ -176,7 +176,7 @@ export default function AdminPanel({ user, onLogout }) {
                       <td>
                         {v.voteProcessed ? <span className="badge green">Vote Stored</span>
                           : v.hardwareInitiated ? <span className="badge yellow">Waiting…</span>
-                          : <span className="badge gray">Pending</span>}
+                            : <span className="badge gray">Pending</span>}
                       </td>
                     </tr>
                   ))}
@@ -213,7 +213,7 @@ export default function AdminPanel({ user, onLogout }) {
         )}
 
         {/* ── Blockchain Upload tab ──────────────────────────────────── */}
-        {activeTab === "blockchain" && (
+        {/* {activeTab === "blockchain" && (
           <div className="card">
             <h2>⛓️ Blockchain Upload Results</h2>
 
@@ -235,9 +235,9 @@ export default function AdminPanel({ user, onLogout }) {
             )}
 
             {blockchainResult && !blockchainResult.error && (
-              <>
-                {/* Summary row */}
-                <div className="stats-row" style={{ marginBottom: 24 }}>
+              <> */}
+        {/* Summary row */}
+        {/* <div className="stats-row" style={{ marginBottom: 24 }}>
                   <div className="stat-card">
                     <p className="stat-label">Uploaded</p>
                     <p className="stat-value" style={{ color: "#68d391" }}>{blockchainResult.uploaded}</p>
@@ -254,17 +254,17 @@ export default function AdminPanel({ user, onLogout }) {
                     <p className="stat-label">On-Chain Total</p>
                     <p className="stat-value">{blockchainResult.tally?.total ?? "—"}</p>
                   </div>
-                </div>
+                </div> */}
 
-                {/* Contract address */}
-                {blockchainResult.contractAddress && (
+        {/* Contract address */}
+        {/* {blockchainResult.contractAddress && (
                   <p className="subtitle" style={{ marginBottom: 16 }}>
                     Contract: <code className="mono">{blockchainResult.contractAddress}</code>
                   </p>
-                )}
+                )} */}
 
-                {/* Tally */}
-                {blockchainResult.tally && Object.keys(blockchainResult.tally.candidates).length > 0 && (
+        {/* Tally */}
+        {/* {blockchainResult.tally && Object.keys(blockchainResult.tally.candidates).length > 0 && (
                   <>
                     <h3 style={{ marginBottom: 8 }}>On-Chain Vote Tally</h3>
                     <div className="table-wrap" style={{ marginBottom: 24 }}>
@@ -284,10 +284,10 @@ export default function AdminPanel({ user, onLogout }) {
                       </table>
                     </div>
                   </>
-                )}
+                )} */}
 
-                {/* Per-vote details */}
-                {blockchainResult.details?.length > 0 && (
+        {/* Per-vote details */}
+        {/* {blockchainResult.details?.length > 0 && (
                   <>
                     <h3 style={{ marginBottom: 8 }}>Per-Voter Details</h3>
                     <div className="table-wrap">
@@ -303,8 +303,8 @@ export default function AdminPanel({ user, onLogout }) {
                                 {d.status === "uploaded"
                                   ? <span className="badge green">Uploaded ✓</span>
                                   : d.status === "skipped"
-                                  ? <span className="badge yellow">Already on-chain</span>
-                                  : <span className="badge" style={{ background: "#742a2a", color: "#feb2b2" }}>Error</span>}
+                                    ? <span className="badge yellow">Already on-chain</span>
+                                    : <span className="badge" style={{ background: "#742a2a", color: "#feb2b2" }}>Error</span>}
                               </td>
                               <td className="mono">{d.vote || <span className="null">—</span>}</td>
                               <td className="mono small">{d.txHash
@@ -321,7 +321,7 @@ export default function AdminPanel({ user, onLogout }) {
               </>
             )}
           </div>
-        )}
+        )} */}
       </main>
     </div>
   );
