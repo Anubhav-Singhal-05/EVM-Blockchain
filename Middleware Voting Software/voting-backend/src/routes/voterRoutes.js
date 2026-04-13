@@ -473,5 +473,37 @@ serialHandler.setOnH1Received(async ({ uid, h1 }) => {
     console.error(`❌ Auto H1 processing error for ${uid}:`, err.message);
   }
 });
+// ── GET /api/voters/export-for-blockchain ────────────────────────────
+// Called REMOTELY by the Blockchain machine over WiFi.
+// Returns all completed vote records (uid + hash2) so the blockchain
+// script can fetch them over HTTP instead of connecting directly to MySQL.
+// Protected by a shared API key in the X-API-Key header.
+router.get("/export-for-blockchain", async (req, res) => {
+  try {
+    const expectedKey = process.env.BLOCKCHAIN_API_KEY;
+    if (expectedKey) {
+      const provided = req.headers["x-api-key"];
+      if (!provided || provided !== expectedKey) {
+        return res.status(401).json({ error: "Unauthorized: invalid or missing X-API-Key header" });
+      }
+    }
+
+    const [records] = await pool.execute(`
+      SELECT hr.uid, hr.hash2, hr.created_at AS createdAt, v.name AS voterName
+      FROM hash_records hr
+      INNER JOIN voters v ON v.uid = hr.uid
+      WHERE v.vote_processed = 1
+      ORDER BY hr.created_at ASC
+    `);
+
+    res.json({
+      count:   records.length,
+      records,
+    });
+  } catch (err) {
+    console.error("Export error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 module.exports = router;
