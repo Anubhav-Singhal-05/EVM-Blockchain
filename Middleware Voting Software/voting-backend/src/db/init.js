@@ -1,3 +1,62 @@
+// // const pool = require("./pool");
+
+// // async function initDB() {
+// //   const conn = await pool.getConnection();
+// //   try {
+
+// //     await conn.execute(`
+// //       CREATE TABLE IF NOT EXISTS users (
+// //         id         INT AUTO_INCREMENT PRIMARY KEY,
+// //         username   VARCHAR(100) NOT NULL UNIQUE,
+// //         password   VARCHAR(255) NOT NULL,
+// //         role       ENUM('admin', 'officer') NOT NULL,
+// //         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+// //       )
+// //     `);
+
+// //     await conn.execute(`
+// //       CREATE TABLE IF NOT EXISTS voters (
+// //         id                 INT AUTO_INCREMENT PRIMARY KEY,
+// //         uid                VARCHAR(50)  NOT NULL UNIQUE,
+// //         name               VARCHAR(255) NOT NULL,
+// //         hash1              TEXT         DEFAULT NULL,
+// //         timestamp2         DATETIME     DEFAULT NULL,
+// //         hardware_initiated TINYINT(1)   NOT NULL DEFAULT 0,
+// //         vote_processed     TINYINT(1)   NOT NULL DEFAULT 0,
+// //         initiated_at       DATETIME     DEFAULT NULL,
+// //         created_at         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+// //         updated_at         TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+// //       )
+// //     `);
+
+// //     // If table already existed without initiated_at, add the column silently
+// //     await conn.execute(`
+// //       ALTER TABLE voters ADD COLUMN IF NOT EXISTS initiated_at DATETIME DEFAULT NULL
+// //     `).catch(() => {});
+
+// //     await conn.execute(`
+// //       CREATE TABLE IF NOT EXISTS hash_records (
+// //         id         INT AUTO_INCREMENT PRIMARY KEY,
+// //         uid        VARCHAR(50) NOT NULL UNIQUE,
+// //         hash2      TEXT        NOT NULL,
+// //         created_at TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
+// //       )
+// //     `);
+
+// //     await conn.execute(`
+// //       INSERT IGNORE INTO users (username, password, role) VALUES
+// //         ('admin',   'admin123',   'admin'),
+// //         ('officer', 'officer123', 'officer')
+// //     `);
+
+// //     console.log("✅ MySQL tables ready");
+// //   } finally {
+// //     conn.release();
+// //   }
+// // }
+
+// // module.exports = initDB;
+
 // const pool = require("./pool");
 
 // async function initDB() {
@@ -29,7 +88,7 @@
 //       )
 //     `);
 
-//     // If table already existed without initiated_at, add the column silently
+//     // Force add initiated_at if it's missing
 //     await conn.execute(`
 //       ALTER TABLE voters ADD COLUMN IF NOT EXISTS initiated_at DATETIME DEFAULT NULL
 //     `).catch(() => {});
@@ -43,13 +102,25 @@
 //       )
 //     `);
 
+//     // 🔥 FIX 1: Force the database to upgrade hash2 to TEXT
+//     await conn.execute(`
+//       ALTER TABLE hash_records MODIFY COLUMN hash2 TEXT NOT NULL
+//     `).catch(() => {});
+
+//     // 🔥 FIX 2: Delete the old 'session_id' ghost column if it exists!
+//     await conn.execute(`
+//       ALTER TABLE hash_records DROP COLUMN session_id
+//     `).catch(() => {
+//       // If it fails, it means the column is already deleted, which is perfect!
+//     });
+
 //     await conn.execute(`
 //       INSERT IGNORE INTO users (username, password, role) VALUES
 //         ('admin',   'admin123',   'admin'),
 //         ('officer', 'officer123', 'officer')
 //     `);
 
-//     console.log("✅ MySQL tables ready");
+//     console.log("✅ MySQL tables ready and verified (Ghost columns cleared!)");
 //   } finally {
 //     conn.release();
 //   }
@@ -63,6 +134,7 @@ async function initDB() {
   const conn = await pool.getConnection();
   try {
 
+    // ── TABLE: users ─────────────────────────────────────────
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS users (
         id         INT AUTO_INCREMENT PRIMARY KEY,
@@ -73,10 +145,22 @@ async function initDB() {
       )
     `);
 
+    // ── DB0: master voter list (fetched from MongoDB) ────────
     await conn.execute(`
-      CREATE TABLE IF NOT EXISTS voters (
+      CREATE TABLE IF NOT EXISTS voters_master (
+        id         INT AUTO_INCREMENT PRIMARY KEY,
+        uid        VARCHAR(50)  NOT NULL UNIQUE,
+        name       VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // ── DB1: vote sessions (multiple rows per voter allowed) ──
+    // each initiate → new row, uid is NOT unique here
+    await conn.execute(`
+      CREATE TABLE IF NOT EXISTS vote_sessions (
         id                 INT AUTO_INCREMENT PRIMARY KEY,
-        uid                VARCHAR(50)  NOT NULL UNIQUE,
+        uid                VARCHAR(50)  NOT NULL,
         name               VARCHAR(255) NOT NULL,
         hash1              TEXT         DEFAULT NULL,
         timestamp2         DATETIME     DEFAULT NULL,
@@ -88,39 +172,25 @@ async function initDB() {
       )
     `);
 
-    // Force add initiated_at if it's missing
-    await conn.execute(`
-      ALTER TABLE voters ADD COLUMN IF NOT EXISTS initiated_at DATETIME DEFAULT NULL
-    `).catch(() => {});
-
+    // ── DB2: RSA encrypted hash records (one per session) ────
     await conn.execute(`
       CREATE TABLE IF NOT EXISTS hash_records (
         id         INT AUTO_INCREMENT PRIMARY KEY,
-        uid        VARCHAR(50) NOT NULL UNIQUE,
+        uid        VARCHAR(50) NOT NULL,
+        session_id INT         NOT NULL,
         hash2      TEXT        NOT NULL,
         created_at TIMESTAMP   DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // 🔥 FIX 1: Force the database to upgrade hash2 to TEXT
-    await conn.execute(`
-      ALTER TABLE hash_records MODIFY COLUMN hash2 TEXT NOT NULL
-    `).catch(() => {});
-
-    // 🔥 FIX 2: Delete the old 'session_id' ghost column if it exists!
-    await conn.execute(`
-      ALTER TABLE hash_records DROP COLUMN session_id
-    `).catch(() => {
-      // If it fails, it means the column is already deleted, which is perfect!
-    });
-
+    // ── default users ─────────────────────────────────────────
     await conn.execute(`
       INSERT IGNORE INTO users (username, password, role) VALUES
         ('admin',   'admin123',   'admin'),
         ('officer', 'officer123', 'officer')
     `);
 
-    console.log("✅ MySQL tables ready and verified (Ghost columns cleared!)");
+    console.log("✅ MySQL tables ready (DB0 + DB1 + DB2)");
   } finally {
     conn.release();
   }
