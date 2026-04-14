@@ -1,269 +1,252 @@
 /**
- * api_server.js  —  Blockchain Data REST API
+ * api_server.js  —  Blockchain Read API
  * ─────────────────────────────────────────────────────────────────────
- * A lightweight HTTP server that reads live data from the deployed
- * VotingContract on Ganache and serves it as JSON for the frontend.
+ * Exposes a lightweight REST API that reads vote data directly from the
+ * local Ganache blockchain and serves it to the Voting Frontend.
  *
- * The frontend (Device 1) calls these endpoints over the local network.
+ * The frontend (React/Vite on this same machine) calls these endpoints
+ * to display election results, turnout statistics, and per-voter status
+ * WITHOUT needing direct access to Ganache or the contract JSON.
+ *
+ * ┌─────────────────┐   HTTP GET       ┌──────────────────────┐
+ * │  Voting Frontend│ ◄──────────────  │  api_server.js       │
+ * │  (React/Vite)   │  :4000/api/votes │  (this file)         │
+ * └─────────────────┘                  │       │              │
+ *                                      │  web3 │              │
+ *                                      │       ▼              │
+ *                                      │   Ganache :7545      │
+ *                                      └──────────────────────┘
  *
  * ENDPOINTS:
- *   GET /api/health                 — Server + contract status
- *   GET /api/tally                  — Candidate-wise vote counts + total
- *   GET /api/votes                  — All individual vote records (VID, V)
- *   GET /api/votes/:vid             — Specific voter's full record
- *   GET /api/stats                  — Aggregate stats (for charts/graphs)
+ *   GET /api/votes           — all on-chain vote records
+ *   GET /api/votes/:vid      — single voter's on-chain record
+ *   GET /api/stats           — aggregate tally (totals, candidates)
+ *   GET /api/health          — liveness check
+ *
+ * USAGE:
+ *   npm run api              (from blockchain/ directory)
+ *   node scripts/api_server.js
  *
  * CONFIGURATION (.env):
- *   GANACHE_URL          — Ganache RPC (default: http://127.0.0.1:7545)
- *   API_PORT             — Port to listen on (default: 4000)
- *   API_CORS_ORIGIN      — Allowed CORS origin (default: *)
- *
- * Usage:
- *   node scripts/api_server.js
- *   npm run api
+ *   GANACHE_URL    - Ganache RPC  (default: http://127.0.0.1:7545)
+ *   API_PORT       - Port to listen on  (default: 4000)
+ *   API_CORS_ORIGIN - Allowed CORS origin  (default: *)
  */
 
 require("dotenv").config();
-const http = require("http");
-const Web3 = require("web3");
-const path = require("path");
+
+const express = require("express");
+const cors    = require("cors");
+const Web3    = require("web3");
+const path    = require("path");
 
 // ── Config ────────────────────────────────────────────────────────────
+const GANACHE_URL       = process.env.GANACHE_URL   || "http://127.0.0.1:7545";
+const PORT              = Number(process.env.API_PORT ?? 4000);
+const CORS_ORIGIN       = process.env.API_CORS_ORIGIN || "*";
 
-const GANACHE_URL  = process.env.GANACHE_URL   || "http://127.0.0.1:7545";
-const PORT         = Number(process.env.API_PORT || 4000);
-const CORS_ORIGIN  = process.env.API_CORS_ORIGIN || "*";
+// ── Express setup ────────────────────────────────────────────────────
+const app = express();
+app.use(cors({ origin: CORS_ORIGIN }));
+app.use(express.json());
 
-// ── Blockchain setup ──────────────────────────────────────────────────
-
-let contract = null;
-let web3     = null;
+// ── Web3 + Contract (loaded once at startup) ─────────────────────────
+let web3, contract, contractReady = false, initError = null;
 
 async function initBlockchain() {
-  web3 = new Web3(GANACHE_URL);
-  const networkId    = await web3.eth.net.getId();
-  const contractJson = require(path.join(__dirname, "..", "build", "contracts", "VotingContract.json"));
-  const deployed     = contractJson.networks[networkId];
+  try {
+    web3 = new Web3(GANACHE_URL);
 
-  if (!deployed) {
-    throw new Error(
-      `VotingContract not deployed on Ganache network ${networkId}. ` +
-      `Run: npx truffle migrate --network development`
-    );
+    // Verify Ganache is reachable
+    await web3.eth.getBlockNumber();
+
+    const networkId   = await web3.eth.net.getId();
+    const contractJson = require(path.join(__dirname, "..", "build", "contracts", "VotingContract.json"));
+    const deployed     = contractJson.networks[networkId];
+
+    if (!deployed) {
+      throw new Error(
+        `VotingContract not deployed on network ${networkId}. ` +
+        `Run: npx truffle migrate --network development`
+      );
+    }
+
+    contract = new web3.eth.Contract(contractJson.abi, deployed.address);
+    contractReady = true;
+
+    console.log(`✅ Connected to Ganache at ${GANACHE_URL}`);
+    console.log(`✅ VotingContract at ${deployed.address} (network ${networkId})`);
+  } catch (err) {
+    initError = err.message;
+    console.error(`❌ Blockchain init failed: ${err.message}`);
+    console.error(`   → Start Ganache and deploy the contract, then restart this server.`);
   }
-
-  contract = new web3.eth.Contract(contractJson.abi, deployed.address);
-  console.log(`[Blockchain] Contract: ${deployed.address}`);
-  return deployed.address;
 }
 
-// ── Data readers ──────────────────────────────────────────────────────
-
-async function getTally() {
-  const [total, candidates] = await Promise.all([
-    contract.methods.getTotalVotes().call(),
-    contract.methods.getAllCandidates().call(),
-  ]);
-
-  const breakdown = {};
-  await Promise.all(
-    candidates.map(async (c) => {
-      breakdown[c] = Number(await contract.methods.getCandidateVotes(c).call());
-    })
-  );
-
-  return {
-    total:     Number(total),
-    candidates: breakdown,
-  };
-}
-
-async function getAllVotes() {
-  const vids = await contract.methods.getAllVIDs().call();
-  const records = await Promise.all(
-    vids.map(async (vid) => {
-      const r = await contract.methods.getVote(vid).call();
-      return {
-        vid:   r[0],
-        vote:  r[1],
-        ts1:   r[3],
-        ts2:   r[5],
-        // encrypted blobs — included for auditability
-        e1:    r[2],
-        e2:    r[4],
-      };
-    })
-  );
-  return records;
-}
-
-async function getVoteByVID(vid) {
-  const r = await contract.methods.getVote(vid).call();
-  return {
-    vid:  r[0],
-    vote: r[1],
-    e1:   r[2],
-    ts1:  r[3],
-    e2:   r[4],
-    ts2:  r[5],
-  };
-}
-
-async function getStats() {
-  const [tally, vids] = await Promise.all([
-    getTally(),
-    contract.methods.getAllVIDs().call(),
-  ]);
-
-  // Build timeline: votes per hour
-  const allVotes = await getAllVotes();
-  const hourBuckets = {};
-  for (const v of allVotes) {
-    if (!v.ts2) continue;
-    const d    = new Date(v.ts2);
-    const hour = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:00`;
-    hourBuckets[hour] = (hourBuckets[hour] || 0) + 1;
-  }
-
-  const timeline = Object.entries(hourBuckets)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([hour, count]) => ({ hour, count }));
-
-  // Candidate percentages
-  const candidateStats = Object.entries(tally.candidates).map(([name, votes]) => ({
-    name,
-    votes,
-    percentage: tally.total > 0 ? Number(((votes / tally.total) * 100).toFixed(2)) : 0,
-  }));
-
-  return {
-    totalVotes:     tally.total,
-    candidateStats,
-    timeline,
-    fetchedAt:      new Date().toISOString(),
-  };
-}
-
-// ── HTTP Router ───────────────────────────────────────────────────────
-
-function sendJSON(res, statusCode, data) {
-  const body = JSON.stringify(data, null, 2);
-  res.writeHead(statusCode, {
-    "Content-Type":                "application/json",
-    "Access-Control-Allow-Origin": CORS_ORIGIN,
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-  });
-  res.end(body);
-}
-
-function sendError(res, statusCode, message) {
-  sendJSON(res, statusCode, { error: message });
-}
-
-async function router(req, res) {
-  // Handle CORS preflight
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin":  CORS_ORIGIN,
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+// ── Middleware: guard for blockchain readiness ───────────────────────
+function requireBlockchain(req, res, next) {
+  if (!contractReady) {
+    return res.status(503).json({
+      error: "Blockchain not ready",
+      detail: initError || "Contract not yet initialised",
     });
-    return res.end();
   }
+  next();
+}
 
-  if (req.method !== "GET") return sendError(res, 405, "Method Not Allowed");
+// ── Helper: fetch a single vote record by VID ────────────────────────
+async function fetchVoteRecord(vid) {
+  try {
+    const r = await contract.methods.getVote(vid).call();
+    // getVote returns (vid, vote, e1, ts1, e2, ts2)
+    return {
+      vid:  r[0],
+      vote: r[1].trim(),      // remove vote-padding spaces
+      e1:   r[2],
+      ts1:  r[3],
+      e2:   r[4],
+      ts2:  r[5],
+    };
+  } catch {
+    // contract reverts with "No vote found for this VID"
+    return null;
+  }
+}
 
-  const url = req.url.split("?")[0].replace(/\/$/, "");
+// ── Helper: fetch all vote records ───────────────────────────────────
+async function fetchAllVotes() {
+  const vids = await contract.methods.getAllVIDs().call();
+  const votes = await Promise.all(vids.map(fetchVoteRecord));
+  return votes.filter(Boolean);
+}
+
+// ── Routes ────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/health
+ * Quick liveness/readiness probe.
+ */
+app.get("/api/health", async (req, res) => {
+  if (!contractReady) {
+    return res.status(503).json({
+      status: "degraded",
+      ganache: GANACHE_URL,
+      error: initError || "Contract not initialised",
+    });
+  }
 
   try {
-    // ── GET /api/health ──────────────────────────────────────────────
-    if (url === "/api/health" || url === "/") {
-      const networkId = await web3.eth.net.getId();
-      const block     = await web3.eth.getBlockNumber();
-      sendJSON(res, 200, {
-        status:          "ok",
-        contractAddress: contract.options.address,
-        ganacheUrl:      GANACHE_URL,
-        networkId:       Number(networkId),
-        currentBlock:    Number(block),
-        timestamp:       new Date().toISOString(),
-      });
-
-    // ── GET /api/tally ───────────────────────────────────────────────
-    } else if (url === "/api/tally") {
-      sendJSON(res, 200, await getTally());
-
-    // ── GET /api/votes ───────────────────────────────────────────────
-    } else if (url === "/api/votes") {
-      const votes = await getAllVotes();
-      sendJSON(res, 200, { count: votes.length, votes });
-
-    // ── GET /api/votes/:vid ──────────────────────────────────────────
-    } else if (url.startsWith("/api/votes/")) {
-      const vid = decodeURIComponent(url.replace("/api/votes/", ""));
-      if (!vid) return sendError(res, 400, "VID is required");
-      try {
-        const record = await getVoteByVID(vid);
-        sendJSON(res, 200, record);
-      } catch (err) {
-        if (err.message.includes("not found") || err.message.includes("revert")) {
-          sendError(res, 404, `No vote found for voter ID: ${vid}`);
-        } else {
-          throw err;
-        }
-      }
-
-    // ── GET /api/stats ───────────────────────────────────────────────
-    } else if (url === "/api/stats") {
-      sendJSON(res, 200, await getStats());
-
-    // ── 404 ──────────────────────────────────────────────────────────
-    } else {
-      sendJSON(res, 404, {
-        error:    "Not Found",
-        available: ["/api/health", "/api/tally", "/api/votes", "/api/votes/:vid", "/api/stats"],
-      });
-    }
+    const blockNumber = await web3.eth.getBlockNumber();
+    const totalVotes  = await contract.methods.getTotalVotes().call();
+    res.json({
+      status:     "ok",
+      ganache:    GANACHE_URL,
+      blockNumber: Number(blockNumber),
+      totalVotes:  Number(totalVotes),
+    });
   } catch (err) {
-    console.error(`[Error] ${req.url} —`, err.message);
-    sendError(res, 500, err.message);
+    res.status(500).json({ status: "error", detail: err.message });
   }
-}
+});
+
+/**
+ * GET /api/votes
+ * Returns all on-chain vote records.
+ *
+ * Response shape (matches what App.jsx expects):
+ * {
+ *   count: 3,
+ *   votes: [
+ *     { vid, vote, e1, ts1, e2, ts2 },
+ *     ...
+ *   ]
+ * }
+ */
+app.get("/api/votes", requireBlockchain, async (req, res) => {
+  try {
+    const votes = await fetchAllVotes();
+    res.json({ count: votes.length, votes });
+  } catch (err) {
+    console.error("[GET /api/votes] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/votes/:vid
+ * Returns the on-chain record for a single voter.
+ *
+ * 200 → { vid, vote, e1, ts1, e2, ts2 }
+ * 404 → { error: "Voter has not voted yet" }
+ */
+app.get("/api/votes/:vid", requireBlockchain, async (req, res) => {
+  try {
+    const vid    = req.params.vid.toUpperCase().trim();
+    const record = await fetchVoteRecord(vid);
+    if (!record) {
+      return res.status(404).json({ error: "Voter has not voted yet", vid });
+    }
+    res.json(record);
+  } catch (err) {
+    console.error(`[GET /api/votes/${req.params.vid}] Error:`, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/stats
+ * Aggregate tally: total votes, per-candidate counts, list of all VIDs.
+ *
+ * {
+ *   totalVotes: 5,
+ *   candidates: [
+ *     { name: "BJP", votes: 3 },
+ *     { name: "INC", votes: 2 }
+ *   ],
+ *   vids: ["UID001", "UID032", ...]
+ * }
+ */
+app.get("/api/stats", requireBlockchain, async (req, res) => {
+  try {
+    const [totalVotes, candidateNames, vids] = await Promise.all([
+      contract.methods.getTotalVotes().call(),
+      contract.methods.getAllCandidates().call(),
+      contract.methods.getAllVIDs().call(),
+    ]);
+
+    const candidates = await Promise.all(
+      candidateNames.map(async (name) => {
+        const count = await contract.methods.getCandidateVotes(name).call();
+        return { name: name.trim(), votes: Number(count) };
+      })
+    );
+
+    res.json({
+      totalVotes: Number(totalVotes),
+      candidates,
+      vids,
+    });
+  } catch (err) {
+    console.error("[GET /api/stats] Error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── 404 catch-all ────────────────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
+});
 
 // ── Start ─────────────────────────────────────────────────────────────
-
-async function main() {
-  console.log(`\n${"═".repeat(55)}`);
-  console.log(`  EVM Blockchain  —  Data API Server`);
-  console.log(`${"═".repeat(55)}`);
-  console.log(`[Ganache ] Connecting to ${GANACHE_URL} ...`);
-
-  try {
-    const contractAddress = await initBlockchain();
-    console.log(`[Contract] Loaded at ${contractAddress}`);
-  } catch (err) {
-    console.error(`[ERROR] ${err.message}`);
-    process.exit(1);
-  }
-
-  const server = http.createServer(router);
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`\n[API] Listening on http://0.0.0.0:${PORT}`);
-    console.log(`[API] CORS origin: ${CORS_ORIGIN}\n`);
-    console.log("  Available endpoints:");
-    console.log(`    GET http://localhost:${PORT}/api/health`);
-    console.log(`    GET http://localhost:${PORT}/api/tally`);
-    console.log(`    GET http://localhost:${PORT}/api/votes`);
-    console.log(`    GET http://localhost:${PORT}/api/votes/:vid`);
-    console.log(`    GET http://localhost:${PORT}/api/stats`);
-    console.log(`\n  The frontend (Device 1) can call:`);
-    console.log(`    http://<this-machine-ip>:${PORT}/api/tally`);
-    console.log(`    http://<this-machine-ip>:${PORT}/api/stats\n`);
+initBlockchain().then(() => {
+  app.listen(PORT, () => {
+    console.log(`\n🚀 Blockchain API Server running on http://localhost:${PORT}`);
+    console.log(`   Endpoints:`);
+    console.log(`     GET /api/health      — liveness check`);
+    console.log(`     GET /api/votes       — all on-chain votes`);
+    console.log(`     GET /api/votes/:vid  — single voter record`);
+    console.log(`     GET /api/stats       — aggregate tally`);
+    console.log(`\n   CORS origin: ${CORS_ORIGIN}`);
+    console.log(`   Serving data from Ganache: ${GANACHE_URL}\n`);
   });
-}
-
-main().catch((err) => {
-  console.error("Fatal:", err.message);
-  process.exit(1);
 });

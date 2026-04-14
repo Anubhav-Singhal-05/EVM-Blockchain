@@ -209,11 +209,11 @@ async function checkGlobalDB() {
 
   // 4c. Test fingerprint lookup for a known voter
   try {
-    const fp = await getVoterFingerprints("VOTER001");
+    const fp = await getVoterFingerprints("UID001");
     if (fp) {
-      ok(`getVoterFingerprints("VOTER001") → F1=${DIM(String(fp.fingerprint_1).slice(0, 25))}, F2=${DIM(String(fp.fingerprint_2).slice(0, 25))}`);
+      ok(`getVoterFingerprints("UID001") → F1=${DIM(String(fp.fingerprint_1).slice(0, 25))}, F2=${DIM(String(fp.fingerprint_2).slice(0, 25))}`);
     } else {
-      warn("VOTER001 not found — sample data may not be seeded yet.");
+      warn("UID001 not found — sample data may not be seeded yet.");
     }
   } catch (err) {
     fail(`Fingerprint lookup failed: ${err.message}`);

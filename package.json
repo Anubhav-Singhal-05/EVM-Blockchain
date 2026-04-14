@@ -2,8 +2,8 @@
   "name": "evm-blockchain-workspace",
   "version": "1.0.0",
   "scripts": {
-    "dev": "concurrently -c \"cyan,magenta,yellow\" -n \"MOCK-CHAIN,GLOBAL-DB,FRONTEND\" \"npm run dev:api\" \"npm run dev:db\" \"npm run dev:frontend\"",
-    "dev:api": "cd \"Blockchain Software/blockchain\" && node scripts/mock_api.js",
+    "dev": "concurrently -c \"cyan,magenta,yellow\" -n \"BLOCKCHAIN-API,GLOBAL-DB,FRONTEND\" \"npm run dev:api\" \"npm run dev:db\" \"npm run dev:frontend\"",
+    "dev:api": "cd \"Blockchain Software/blockchain\" && node scripts/api_server.js",
     "dev:db": "cd voting-global-db && node server.js",
     "dev:frontend": "cd Voting Frontend && npm run dev"
   },

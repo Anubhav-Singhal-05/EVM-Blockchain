@@ -134,7 +134,35 @@ app.get('/api/voters/:voterId/fingerprints', async (req, res) => {
   }
 });
 
+// Fetch a SINGLE voter's full demographic profile by VID (For Frontend enrichment)
+// GET /api/voters/:vid
+app.get('/api/voters/:vid', async (req, res) => {
+  try {
+    const uid = req.params.vid.toString().trim().toUpperCase();
+    const voter = await Voter.findOne({
+      $or: [{ vid: uid }, { voterId: uid }]
+    });
+    if (!voter) return res.status(404).json({ error: 'Voter not found', vid: uid });
+
+    res.json({
+      vid:       voter.vid,
+      firstName: voter.firstName,
+      lastName:  voter.lastName,
+      age:       voter.age,
+      gender:    voter.gender,
+      ward:      voter.ward,
+      district:  voter.district,
+      state:     voter.state,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Global DB API running on http://localhost:${PORT}`);
+  console.log(`   GET /api/voters           — all voters`);
+  console.log(`   GET /api/voters/:vid      — single voter profile`);
+  console.log(`   GET /api/voters/:vid/fingerprints — fingerprints`);
 });
