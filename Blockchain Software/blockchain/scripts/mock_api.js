@@ -7,8 +7,7 @@ app.use(express.json());
 
 // Fake blockchain ledger
 let mockLedger = [
-  { vid: "VOTER001", e1: "a1b2c3d4e5f67890", ts2: new Date(Date.now() - 3600000).toISOString(), vote: "Party A" },
-  { vid: "VOTER002", e1: "f6e5d4c3b2a10987", ts2: new Date(Date.now() - 1800000).toISOString(), vote: "Party B" }
+  
 ];
 
 // Frontend fetches from here

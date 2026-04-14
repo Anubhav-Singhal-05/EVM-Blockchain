@@ -28,16 +28,16 @@ mongoose.connect(MONGO_URI)
 
 // 2. Define the Voter Schema
 const voterSchema = new mongoose.Schema({
-  voterId: { type: String, required: true, unique: true },
+  vid: { type: String, required: true, unique: true },
   firstName: String,
   lastName: String,
   age: Number,
   gender: String,
-  ward: String,
+  ward: Number,
   district: String,
   state: String,
-  fingerprint_1: String, 
-  fingerprint_2: String
+  f1: String, 
+  f2: String
 });
 
 const Voter = mongoose.model('Voter', voterSchema);
@@ -45,7 +45,7 @@ const Voter = mongoose.model('Voter', voterSchema);
 // 3. Sample Data
 const sampleVoters = [
   // Explicitly requested entries
-  { voterId: 'VOTER001', firstName: 'Keshav', lastName: 'Verma', age: 22, gender: 'Male', ward: 'Ward 2', district: 'East Delhi', state: 'Delhi', fingerprint_1: 'ENC_F1_KESHAV', fingerprint_2: 'ENC_F2_KESHAV' },
+  { voterId: 'UID001', firstName: 'Keshav', lastName: 'Verma', age: 22, gender: 'Male', ward: 'Ward 2', district: 'East Delhi', state: 'Delhi', fingerprint_1: 'ENC_F1_KESHAV', fingerprint_2: 'ENC_F2_KESHAV' },
   { voterId: 'VOTER002', firstName: 'Shivam', lastName: 'Gupta', age: 22, gender: 'Male', ward: 'Ward 7', district: 'Najafgarh', state: 'Delhi', fingerprint_1: 'ENC_F1_SHIVAM', fingerprint_2: 'ENC_F2_SHIVAM' },
   { voterId: 'VOTER003', firstName: 'Anubhav', lastName: 'Singhal', age: 21, gender: 'Male', ward: 'Ward 6', district: 'Vaishali', state: 'Uttar Pradesh', fingerprint_1: 'ENC_F1_ANUBHAV', fingerprint_2: 'ENC_F2_ANUBHAV' },
   { voterId: 'VOTER004', firstName: 'Abhimanyu', lastName: 'Mittal', age: 20, gender: 'Male', ward: 'Ward 15', district: 'Noida', state: 'Uttar Pradesh', fingerprint_1: 'ENC_F1_ABHI', fingerprint_2: 'ENC_F2_ABHI' },
@@ -72,18 +72,36 @@ const sampleVoters = [
 // Seed Database Function
 async function seedDatabase() {
   try {
-    const count = await Voter.countDocuments();
-    if (count === 0) {
-      await Voter.insertMany(sampleVoters);
-      console.log('✅ Database was empty. Seeded 20 sample voters.');
-    } else {
-      console.log(`ℹ️ Database already contains ${count} entries. Skipping seeding to protect existing data.`);
-    }
+    const normalizedVoters = sampleVoters.map((v) => ({
+      vid: (v.vid || v.voterId || '').toString().trim().toUpperCase(),
+      firstName: v.firstName,
+      lastName: v.lastName,
+      age: v.age,
+      gender: v.gender,
+      ward: v.ward,
+      district: v.district,
+      state: v.state,
+      f1: v.f1 || v.fingerprint_1 || null,
+      f2: v.f2 || v.fingerprint_2 || null,
+    }));
+
+    const ops = normalizedVoters.map((voter) => ({
+      updateOne: {
+        filter: { vid: voter.vid },
+        update: { $setOnInsert: voter },
+        upsert: true,
+      },
+    }));
+
+    const result = await Voter.bulkWrite(ops, { ordered: false });
+    const inserted = (result.upsertedCount || 0);
+    const existing = normalizedVoters.length - inserted;
+    console.log(`✅ Seed sync complete. Inserted: ${inserted}, already present: ${existing}.`);
   } catch (err) {
     console.error('❌ Error during seeding:', err);
   }
 }
-seedDatabase();
+// seedDatabase();
 
 // --- API ENDPOINTS ---
 
@@ -100,13 +118,16 @@ app.get('/api/voters', async (req, res) => {
 // Fetch specific fingerprints (For Blockchain Verification)
 app.get('/api/voters/:voterId/fingerprints', async (req, res) => {
   try {
-    const voter = await Voter.findOne({ voterId: req.params.voterId });
+    const uid = req.params.voterId.toString().trim().toUpperCase();
+    const voter = await Voter.findOne({
+      $or: [{ vid: uid }, { voterId: uid }]
+    });
     if (!voter) return res.status(404).json({ error: 'Voter not found' });
     
     res.json({
-      voterId: voter.voterId,
-      fingerprint_1: voter.fingerprint_1,
-      fingerprint_2: voter.fingerprint_2
+      voterId: voter.vid || voter.voterId,
+      fingerprint_1: voter.f1 || voter.fingerprint_1,
+      fingerprint_2: voter.f2 || voter.fingerprint_2
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

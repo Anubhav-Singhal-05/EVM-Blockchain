@@ -135,14 +135,29 @@ export default function App() {
   const totalVotesCast = blockchainData.length;
   const turnoutPercentage = totalVoters > 0 ? ((totalVotesCast / totalVoters) * 100).toFixed(1) : 0;
   const unmatchedVotes = 0; // Mock
+  const getVoterId = (record) => (record?.voterId || record?.vid || '').toString();
+  const getWard = (record) => (record?.ward ?? record?.wardNumber ?? '').toString().trim();
+  const normalizeWard = (value) =>
+    value
+      .toString()
+      .trim()
+      .toLowerCase()
+      .replace(/^ward\s*/i, '');
+  const formatWard = (record) => {
+    const ward = getWard(record);
+    if (!ward) return 'Ward N/A';
+    return /^ward\s*/i.test(ward) ? ward : `Ward ${ward}`;
+  };
 
   // Merge Data for Table
   const mergedData = votersData.map(voter => {
-    const voteRecord = blockchainData.find(b => b.voterId === voter.voterId);
+    const voterId = getVoterId(voter);
+    const voteRecord = blockchainData.find(b => getVoterId(b) === voterId);
     return {
       ...voter,
+      voterId,
       fullName: `${voter.firstName} ${voter.lastName}`,
-      location: `${voter.ward}, ${voter.district}`,
+      location: `${formatWard(voter)}, ${voter.district || 'District N/A'}`,
       txHash: voteRecord ? voteRecord.txHash : '—',
       timeFormatted: voteRecord ? new Date(voteRecord.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—',
       status: voteRecord ? 'Voted' : 'Did Not Vote'
@@ -152,19 +167,21 @@ export default function App() {
   // --- Search Logic ---
   const handleSearch = () => {
     if (!searchTerm) return setSearchResult(null);
-    const term = searchTerm.toLowerCase();
+    const term = searchTerm.trim().toLowerCase();
+    const wardTerm = normalizeWard(searchTerm);
     
-    const voter = votersData.find(v => v.voterId.toLowerCase() === term);
+    const voter = votersData.find(v => getVoterId(v).toLowerCase() === term);
     if (voter) {
-      const voteRecord = blockchainData.find(b => b.voterId === voter.voterId);
-      setSearchResult({ type: 'voter', data: { ...voter, voted: !!voteRecord, txHash: voteRecord?.txHash } });
+      const voterId = getVoterId(voter);
+      const voteRecord = blockchainData.find(b => getVoterId(b) === voterId);
+      setSearchResult({ type: 'voter', data: { ...voter, voterId, voted: !!voteRecord, txHash: voteRecord?.txHash } });
       return;
     }
 
-    const wardVoters = votersData.filter(v => v.ward.toLowerCase() === term);
+    const wardVoters = votersData.filter(v => normalizeWard(getWard(v)) === wardTerm);
     if (wardVoters.length > 0) {
-      const voted = wardVoters.filter(v => blockchainData.some(b => b.voterId === v.voterId)).length;
-      setSearchResult({ type: 'ward', data: { name: wardVoters[0].ward, eligible: wardVoters.length, voted, percent: ((voted/wardVoters.length)*100).toFixed(1) } });
+      const voted = wardVoters.filter(v => blockchainData.some(b => getVoterId(b) === getVoterId(v))).length;
+      setSearchResult({ type: 'ward', data: { name: formatWard(wardVoters[0]), eligible: wardVoters.length, voted, percent: ((voted/wardVoters.length)*100).toFixed(1) } });
       return;
     }
 
@@ -189,7 +206,7 @@ export default function App() {
 
   const ageGroups = { '18-30': 0, '31-45': 0, '46+': 0 };
   blockchainData.forEach(v => {
-    const govRecord = votersData.find(g => g.voterId === v.voterId);
+    const govRecord = votersData.find(g => getVoterId(g) === getVoterId(v));
     if (govRecord) {
       if (govRecord.age <= 30) ageGroups['18-30']++;
       else if (govRecord.age <= 45) ageGroups['31-45']++;
@@ -207,7 +224,7 @@ export default function App() {
       const key = voter[level];
       if (!stats[key]) stats[key] = { name: key, eligible: 0, voted: 0 };
       stats[key].eligible++;
-      if (blockchainData.some(b => b.voterId === voter.voterId)) stats[key].voted++;
+      if (blockchainData.some(b => getVoterId(b) === getVoterId(voter))) stats[key].voted++;
     });
     return Object.values(stats).map(stat => ({
       ...stat,
@@ -240,8 +257,8 @@ export default function App() {
   // --- Comparative Logic ---
   const getDemographicsForDistrict = (districtName) => {
     const voters = votersData.filter(v => v.district === districtName);
-    const votedIds = blockchainData.map(b => b.voterId);
-    const votedList = voters.filter(v => votedIds.includes(v.voterId));
+    const votedIds = blockchainData.map(b => getVoterId(b));
+    const votedList = voters.filter(v => votedIds.includes(getVoterId(v)));
     
     const gender = { Male: 0, Female: 0 };
     const age = { '18-30': 0, '31-45': 0, '46+': 0 };
@@ -293,7 +310,7 @@ export default function App() {
           <Search className="w-5 h-5 text-textMuted" />
           <input 
             type="text" 
-            placeholder="Search for a Voter ID (e.g., VOTER001) or Ward (e.g., Ward 3)..."
+            placeholder="Search for a Voter ID (e.g., UID001)"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -311,7 +328,7 @@ export default function App() {
               <div>
                 <span className="text-sm text-blue-300 font-bold uppercase tracking-wider">Voter Record Found</span>
                 <p className="text-lg text-white mt-1">{searchResult.data.firstName} {searchResult.data.lastName} ({searchResult.data.voterId})</p>
-                <p className="text-sm text-textMuted">Location: {searchResult.data.ward}, {searchResult.data.district}, {searchResult.data.state}</p>
+                <p className="text-sm text-textMuted">Location: {formatWard(searchResult.data)}, {searchResult.data.district || 'District N/A'}, {searchResult.data.state || 'State N/A'}</p>
               </div>
             )}
             {searchResult.type === 'ward' && (
@@ -345,9 +362,9 @@ export default function App() {
             <h2 className="text-2xl font-bold text-white">Final Election Results</h2>
             <p className="text-sm text-textMuted mt-1">Data synced from Blockchain and cross-referenced with Government Voter List.</p>
           </div>
-          <button className="flex items-center gap-2 bg-cardBg border border-cardBorder hover:bg-cardBorder px-4 py-2 rounded-md text-sm transition">
+          {/* <button className="flex items-center gap-2 bg-cardBg border border-cardBorder hover:bg-cardBorder px-4 py-2 rounded-md text-sm transition">
             <Download className="w-4 h-4 text-accentBlue" /> Export Final Report
-          </button>
+          </button> */}
         </div>
 
         {/* KPIs */}
@@ -528,9 +545,9 @@ export default function App() {
                   <select 
                     value={compareDist1} 
                     onChange={(e) => setCompareDist1(e.target.value)}
-                    className="w-full bg-cardBg border border-cardBorder text-white p-3 rounded-md mb-6 focus:outline-none focus:border-accentBlue"
+                    className="demographics-select w-full bg-cardBg border border-cardBorder text-white p-3 rounded-md mb-6 focus:outline-none focus:border-accentBlue"
                   >
-                    {allDistricts.map(d => <option key={`d1-${d.name}`} value={d.name}>{d.name}</option>)}
+                    {allDistricts.map(d => <option className="bg-white text-black" key={`d1-${d.name}`} value={d.name}>{d.name}</option>)}
                   </select>
                   
                   <div className="text-center mb-6">
@@ -568,9 +585,9 @@ export default function App() {
                   <select 
                     value={compareDist2} 
                     onChange={(e) => setCompareDist2(e.target.value)}
-                    className="w-full bg-cardBg border border-cardBorder text-white p-3 rounded-md mb-6 focus:outline-none focus:border-accentGreen"
+                    className="demographics-select w-full bg-cardBg border border-cardBorder text-white p-3 rounded-md mb-6 focus:outline-none focus:border-accentGreen"
                   >
-                    {allDistricts.map(d => <option key={`d2-${d.name}`} value={d.name}>{d.name}</option>)}
+                    {allDistricts.map(d => <option className="bg-white text-black" key={`d2-${d.name}`} value={d.name}>{d.name}</option>)}
                   </select>
                   
                   <div className="text-center mb-6">
