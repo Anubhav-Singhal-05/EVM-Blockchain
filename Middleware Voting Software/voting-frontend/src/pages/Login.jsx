@@ -23,7 +23,7 @@ export default function Login({ onLogin }) {
 
   return (
     <div className="login-page">
-      <div className="login-left">
+      {/* <div className="login-left">
         <div className="login-left-content">
           <span className="login-logo-icon">🗳️</span>
           <h1 className="login-brand">Voting Middle Software</h1>
@@ -38,7 +38,7 @@ export default function Login({ onLogin }) {
             <div className="login-feature"><span>👥</span><p>Role-based access: Admin and Registration Officer</p></div>
           </div>
         </div>
-      </div>
+      </div> */}
 
       <div className="login-right">
         <div className="login-box">

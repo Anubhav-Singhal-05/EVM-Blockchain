@@ -260,6 +260,7 @@ String extractBase64Template() {
 }
 
 void executeScanF1() {
+  delay(2000);
   lcd.clear();
   lcd.print("Welcome:");
   lcd.setCursor(0, 1);

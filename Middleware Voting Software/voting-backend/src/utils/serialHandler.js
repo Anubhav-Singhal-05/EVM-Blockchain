@@ -134,7 +134,7 @@
 const { SerialPort }     = require("serialport");
 const { ReadlineParser } = require("@serialport/parser-readline");
 
-const COM_PORT  = "COM7";   // ← change to your actual COM port
+const COM_PORT  = "COM7";   
 const BAUD_RATE = 115200;
 
 let port   = null;
