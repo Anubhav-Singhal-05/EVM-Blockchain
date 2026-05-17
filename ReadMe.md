@@ -106,7 +106,8 @@ npm run upload
 ```
 
 ### Auditing On-Chain Data
-Run the verification script to output the immutable tally. Any manual database tampering injected at the middleware level will result in an immediate cryptographic mismatch against the Generic Block Hash, exposing the breach.
+Run the verification script to output the immutable tally. Any manual database tampering injected at the middleware level will
+result in an immediate cryptographic mismatch against the Generic Block Hash, exposing the breach.
 ```bash
 npm run verify
 
