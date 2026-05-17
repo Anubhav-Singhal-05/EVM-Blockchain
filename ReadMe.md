@@ -8,10 +8,10 @@ An end-to-end verifiable e-voting system engineered to eliminate the "black box"
 
 The system utilizes an asynchronous, multi-tiered architecture that relies on Hardware-Level Onion Routing to guarantee physical security and cryptographic anonymity.
 
-*   **Edge (IoT Hardware Interface):** An air-gapped ESP32 microcontroller and AS608 optical fingerprint scanner capture the voter's biometric signature and ballot choice. This payload is concatenated with a timestamp and encrypted locally into a monolithic 4-digit hexadecimal block cipher called `h1`.
-*   **Local Middleware (Polling Station Bridge):** Operating as an immediate receiver, the middleware appends Polling Station metadata (Voter ID, Name, Timestamp 2) without decrypting the ballot. This entire data structure is encrypted a second time to generate payload `h2`. In the event of network failure, this middleware acts as an offline cryptographic vault, buffering encrypted votes until connectivity is restored.
-*   **Global Backend Server:** Acting as the sole holder of private decryption keys, this server strips the `h2` layer to verify polling station metadata, then decrypts the `h1` payload to extract and match raw biometric templates against the pre-enrolled Global Voter Database.
-*   **Blockchain Ledger:** Upon a successful biometric match, the Global Server formats the validated vote into a transaction. The Ethereum/Hyperledger smart contract receives the payload, verifies the hashed Voter ID to reject duplicate attempts, and writes the vote to the immutable tally.
+*   **Edge (IoT Hardware Interface):** An air-gapped ESP32 microcontroller and AS608 optical fingerprint scanner capture the voter's biometric signature and ballot choice. This payload is concatenated with a timestamp and encrypted locally into a monolithic 4-digit hexadecimal block cipher called `H1`.
+*   **Local Middleware (Polling Station Bridge):** Operating as an immediate receiver, the middleware appends Polling Station metadata (Voter ID, Name, Timestamp_2) without decrypting the ballot. This entire data structure is encrypted a second time to generate payload `H2`. In the event of network failure, this middleware acts as an offline cryptographic vault, buffering encrypted votes until connectivity is restored.
+*   **Global Backend Server:** Acting as the sole holder of private decryption keys, this server strips the `H2` layer to verify polling station metadata, then decrypts the `H1` payload to extract and match raw biometric templates against the pre-enrolled Global Voter Database.
+*   **Blockchain Ledger:** Upon a successful biometric match, the Global Server formats the validated vote into a transaction. The Ethereum smart contract receives the payload, verifies the hashed Voter ID to reject duplicate attempts, and writes the vote to the immutable tally.
 
 ---
 
@@ -44,7 +44,6 @@ Must be operational before the API server boots. Ensure Ganache is running on `h
 ```bash
 cd "Blockchain Software\blockchain"
 npx truffle migrate --network development
-
 ```
 
 #### 2. Global DB (MongoDB Bridge)
@@ -54,7 +53,6 @@ Establishes the connection to the remote identity database.
 ```bash
 cd voting-global-db
 node server.js
-
 ```
 
 * **Runs on:** `http://localhost:3000`
@@ -66,7 +64,6 @@ Exposes the on-chain data to external web services.
 ```bash
 cd "Blockchain Software\blockchain"
 npm run api
-
 ```
 
 * **Runs on:** `http://localhost:4000`
@@ -78,7 +75,6 @@ Initializes the user interfaces for Registration Officers and Administrators.
 ```bash
 cd "Voting Frontend"
 npm run dev
-
 ```
 
 * **Access at:** `http://localhost:5173`
@@ -92,25 +88,18 @@ Following the conclusion of the voting block, the offline-buffered records withi
 
 ### Bridging to Blockchain
 
-* Execute via the Admin Panel by selecting **"📤 Upload to Blockchain"**. This triggers the API to unpack `h2` and `h1`, appending the votes directly to the smart contract via Web3.
+* Execute via the Admin Panel by selecting **"📤 Upload to Blockchain"**. This triggers the API to unpack `H2` and `H1`, appending the votes directly to the smart contract via Web3.
 * Alternatively, force the manual script execution:
 ```bash
 cd "Blockchain Software\blockchain"
 npm run upload
-
-
 ```
 
-
-
-```
 
 ### Auditing On-Chain Data
-Run the verification script to output the immutable tally. Any manual database tampering injected at the middleware level will
-result in an immediate cryptographic mismatch against the Generic Block Hash, exposing the breach.
+Run the verification script to output the immutable tally. Any manual database tampering injected at the middleware level will result in an immediate cryptographic mismatch against the Generic Block Hash, exposing the breach.
 ```bash
 npm run verify
-
 ```
 
 ---
@@ -121,11 +110,6 @@ Developed at **Netaji Subhas University of Technology** by:
 
 * **Abhimanyu Mittal**
 * **Anubhav Singhal**
-* **Shivam**
+* **Shivam Gupta**
 * **Keshav Verma**
 * **Dr. Gaurav Singal** (Advisor)
-
-```
-
-
-```
