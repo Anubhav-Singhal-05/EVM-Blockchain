@@ -79,13 +79,16 @@ async function main() {
   console.log("     INDIVIDUAL VOTE RECORDS (VID, V)  ");
   console.log("═══════════════════════════════════════\n");
 
-  console.log("  VID".padEnd(25) + "Vote (Candidate)");
-  console.log("  " + "─".repeat(40));
+  // console.log("  VID".padEnd(25) + "Vote (Candidate)");
+  console.log("Vote (Candidate)");
+  // console.log("  " + "─".repeat(40));
+  console.log("─".repeat(40));
 
   for (const vid of allVIDs) {
     const record = await contract.methods.getVote(vid).call();
     // record returns: (vid, vote, e1, ts1, e2, ts2)
-    console.log(`  ${record[0].padEnd(23)} ${record[1]}`);
+    // console.log(`  ${record[0].padEnd(23)} ${record[1]}`);
+    console.log(record[1])
   }
 
   console.log();

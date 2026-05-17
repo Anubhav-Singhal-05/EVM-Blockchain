@@ -625,7 +625,7 @@
   "sourceMap": "133:353:0:-:0;;;160:33;;;-1:-1:-1;;;;;;160:33:0;183:10;160:33;;;133:353;;;;;;;;;;;;;;;;",
   "deployedSourceMap": "133:353:0:-:0;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;200:39;;;;;;;;;160:25:2;;;148:2;133:18;200:39:0;;;;;;;;160:33;;;;;-1:-1:-1;;;;;160:33:0;;;;;;-1:-1:-1;;;;;360:32:2;;;342:51;;330:2;315:18;160:33:0;196:203:2;369:114:0;;;;;;:::i;:::-;;:::i;:::-;;;303:5;;-1:-1:-1;;;;;303:5:0;289:10;:19;281:60;;;;-1:-1:-1;;;281:60:0;;791:2:2;281:60:0;;;773:21:2;830:2;810:18;;;803:30;869;849:18;;;842:58;917:18;;281:60:0;;;;;;;;439:24:::1;:36:::0;369:114::o;404:180:2:-;463:6;516:2;504:9;495:7;491:23;487:32;484:52;;;532:1;529;522:12;484:52;-1:-1:-1;555:23:2;;404:180;-1:-1:-1;404:180:2:o",
   "source": "// Truffle requires a Migrations contract for its migration framework.\r\n// SPDX-License-Identifier: MIT\r\npragma solidity ^0.8.19;\r\n\r\ncontract Migrations {\r\n    address public owner = msg.sender;\r\n    uint256 public last_completed_migration;\r\n\r\n    modifier restricted() {\r\n        require(msg.sender == owner, \"Restricted to contract owner\");\r\n        _;\r\n    }\r\n\r\n    function setCompleted(uint256 completed) public restricted {\r\n        last_completed_migration = completed;\r\n    }\r\n}\r\n",
-  "sourcePath": "C:\\Desktop\\Assignments\\Sem 6\\IoT\\EVM-Blockchain\\Blockchain Software\\blockchain\\contracts\\Migrations.sol",
+  "sourcePath": "C:\\Desktop\\Assignments\\Sem 6\\IoT\\Project\\EVM-Blockchain\\Blockchain Software\\blockchain\\contracts\\Migrations.sol",
   "ast": {
     "absolutePath": "project:/contracts/Migrations.sol",
     "exportedSymbols": {
@@ -1034,8 +1034,8 @@
     "5777": {
       "events": {},
       "links": {},
-      "address": "0xbD7a18731F707Ef2039a7b2252bA7313e0C20000",
-      "transactionHash": "0x7f4d248fbe4ef863cfd9d957f643e42955d3d0d5e8c22ffb910541e1f62f4850"
+      "address": "0x8bd8690F71987cd282a83FB85220F18d298Dea7c",
+      "transactionHash": "0x0a458fe274290041f09809956bc8e188ed3e36a48319a4aac5628a13956602d1"
     },
     "1774611503627": {
       "events": {},
@@ -1045,7 +1045,7 @@
     }
   },
   "schemaVersion": "3.4.16",
-  "updatedAt": "2026-04-14T15:01:26.790Z",
+  "updatedAt": "2026-04-15T07:37:03.609Z",
   "networkType": "ethereum",
   "devdoc": {
     "kind": "dev",

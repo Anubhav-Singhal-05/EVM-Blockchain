@@ -50,12 +50,14 @@
  */
 
 require("dotenv").config();
-const https = require("https");
-const http = require("http");
-const Web3 = require("web3");
-const path = require("path");
+const https  = require("https");
+const http   = require("http");
+const Web3   = require("web3");
+const path   = require("path");
+const crypto = require("crypto");
 
 const { connectGlobalDB, disconnectGlobalDB, getVoterFingerprints } = require("./global_db");
+const { verifyFingerprints, extractAS608Payload } = require("./fingerprint_matcher");
 
 // ── Config ────────────────────────────────────────────────────────────
 
@@ -172,98 +174,9 @@ function decryptH1(h1Hex) {
 }
 
 // ── Fingerprint Matching ──────────────────────────────────────────────
-// Both f1/f2 (from H1) and f1_g/f2_g (from Global DB) are
-// Base64-encoded raw byte arrays captured by the AS608 sensor.
-// We decode both to raw Buffers and compare using inverted Hamming distance.
-
-/**
- * Count set bits (popcount) in a byte.
- * @param {number} byte
- * @returns {number}
- */
-function popcount(byte) {
-  let count = 0;
-  let x = byte & 0xFF;
-  while (x) { count += x & 1; x >>>= 1; }
-  return count;
-}
-
-/**
- * Compute byte-level similarity via inverted Hamming distance.
- * @param {Buffer} buf1
- * @param {Buffer} buf2
- * @returns {number} 0–100
- */
-function byteSimilarity(buf1, buf2) {
-  const len = Math.min(buf1.length, buf2.length);
-  if (len === 0) return 0;
-  let matchingBits = 0;
-  for (let i = 0; i < len; i++) {
-    matchingBits += (8 - popcount(buf1[i] ^ buf2[i]));
-  }
-  return (matchingBits / (len * 8)) * 100;
-}
-
-/**
- * Decode a Base64 fingerprint string → raw Buffer of bytes.
- * The ESP32 encodes the raw AS608 sensor bytes as Base64 before sending.
- *
- * @param {string} b64 - Base64 string
- * @returns {Buffer}
- */
-function fingerprintToBuffer(b64) {
-  if (!b64 || typeof b64 !== "string") {
-    throw new Error("Fingerprint is null/undefined or not a string");
-  }
-  return Buffer.from(b64, "base64");
-}
-
-/**
- * Match two Base64 fingerprints by decoding to raw bytes first.
- *
- * @param {string} fp1b64 - Fingerprint from ESP32 (via H1 decryption)
- * @param {string} fp2b64 - Registered fingerprint from Global DB
- * @returns {number} Similarity score 0–100
- */
-function matchFingerprints(fp1b64, fp2b64) {
-  if (!fp1b64 || !fp2b64) return 0;
-
-  let buf1, buf2;
-  try {
-    buf1 = fingerprintToBuffer(fp1b64);
-    buf2 = fingerprintToBuffer(fp2b64);
-  } catch {
-    // Fallback: exact string equality (for mock/test data)
-    return fp1b64 === fp2b64 ? 100 : 0;
-  }
-
-  // If the decoded buffers are too small, it's probably mock/test data
-  if (buf1.length < 10 || buf2.length < 10) {
-    console.log(`    [FP] Warning: Buffer too small (${buf1.length}B / ${buf2.length}B) — using exact match`);
-    return fp1b64 === fp2b64 ? 100 : 0;
-  }
-
-  const score = byteSimilarity(buf1, buf2);
-  return score;
-}
-
-/**
- * Verify a voter's two fingerprints against both registered ones.
- * Either finger matching above the threshold is sufficient.
- *
- * @param {string} f1     - Primary fingerprint from H1 (base64)
- * @param {string} f2     - Secondary fingerprint from H1 (base64)
- * @param {string} f1_g   - Registered primary FP from Global DB (base64)
- * @param {string} f2_g   - Registered secondary FP from Global DB (base64)
- * @param {number} [threshold]
- * @returns {{ passed: boolean, score1: number, score2: number }}
- */
-function verifyFingerprints(f1, f2, f1_g, f2_g, threshold = FP_THRESHOLD) {
-  const score1 = matchFingerprints(f1, f1_g);
-  const score2 = matchFingerprints(f2, f2_g);
-  const passed = score1 > threshold || score2 > threshold;
-  return { passed, score1, score2 };
-}
+// Delegated to fingerprint_matcher.js which strips AS608 UART packet
+// framing before comparing, so only actual fingerprint template bytes
+// are used. See fingerprint_matcher.js for full explanation.
 
 // ── HTTP helper ───────────────────────────────────────────────────────
 
@@ -436,12 +349,19 @@ async function main() {
     }
 
     // ── 4e. Fingerprint verification ─────────────────────────────
-    // Both sides are Base64 → decoded to raw byte arrays for comparison.
-    const { passed, score1, score2 } = verifyFingerprints(f1, f2, f1_g, f2_g);
+    // fingerprint_matcher strips AS608 UART packet framing so only
+    // the actual 640-byte template payload is compared. Threshold is
+    // evaluated on clean bytes (genuine ~75–90%, impostor ~40–60%).
+    // FP_THRESHOLD default: 70 (recommended for payload comparison).
+    const { passed, score1, score2 } = verifyFingerprints(f1, f2, f1_g, f2_g, FP_THRESHOLD);
+
+    // Log whether AS608 parsing worked (helps diagnose degraded matches)
+    const payloadOk = extractAS608Payload(Buffer.from(f1, "base64")) !== null;
+    const modeTag   = payloadOk ? "[payload]" : "[raw‼]";
 
     if (!passed) {
       console.log(
-        `  ✗ ${label} — REJECTED  ` +
+        `  ✗ ${label} — REJECTED ${modeTag}  ` +
         `(F1: ${score1.toFixed(1)}%, F2: ${score2.toFixed(1)}%, threshold: ${FP_THRESHOLD}%)`
       );
       rejected++;
@@ -450,17 +370,25 @@ async function main() {
     }
 
     console.log(
-      `  ✓ ${label} — VERIFIED  ` +
+      `  ✓ ${label} — VERIFIED ${modeTag}  ` +
       `(F1: ${score1.toFixed(1)}%, F2: ${score2.toFixed(1)}%)`
     );
 
     // ── 4f. Cast vote on-chain ────────────────────────────────────
-    // Parameters: vid, vote, e1(=h1Hex), ts1, e2(=hash2), ts2
-    // The contract's require(!exists) is the final duplicate guard.
+    // We store SHA-256 digests (64 hex chars) of h1Hex and hash2
+    // instead of the full strings (which are ~9K and ~60K chars).
+    // Storing the full blobs would cost ~45M gas — way over any
+    // reasonable block gas limit. The full encrypted data stays
+    // in the Middleware MySQL DB for off-chain auditing.
+    // A 64-char hash is enough to prove which original record
+    // corresponds to each on-chain entry.
+    const e1Digest = crypto.createHash("sha256").update(h1Hex).digest("hex");
+    const e2Digest = crypto.createHash("sha256").update(hash2).digest("hex");
+
     try {
       const tx = await contract.methods
-        .castVote(uid, vote.trim(), h1Hex, ts1, hash2, ts2)
-        .send({ from: owner, gas: 3_000_000 });
+        .castVote(uid, vote.trim(), e1Digest, ts1, e2Digest, ts2)
+        .send({ from: owner, gas: 500_000 });
 
       console.log(`  ✓ ${label} — Vote="${vote.trim()}" → Tx: ${tx.transactionHash}`);
       uploaded++;
